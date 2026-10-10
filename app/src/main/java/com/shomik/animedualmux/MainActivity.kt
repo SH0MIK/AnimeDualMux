@@ -305,27 +305,50 @@ class MainActivity : ComponentActivity() {
             .replace("\\", "\\\\")
             .replace(":", "\\:")
             .replace("'", "\\'")
-        val args = mutableListOf(
+        val baseArgs = mutableListOf(
             "-y", "-i", input.absolutePath,
             "-filter_complex", "[0:v:0]split=2[hardbase][clean];[hardbase]subtitles='$subtitlePath'[hard]",
             "-map", "[hard]", "-map", "[clean]"
         )
         val orderedAudio = listOf(japanese) + audioTracks.filter { it.index != japanese.index }
-        orderedAudio.forEach { args.addAll(listOf("-map", "0:${it.index}")) }
-        args.addAll(listOf(
-            "-map_metadata", "0", "-map_chapters", "0",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-            "-c:a", "copy", "-sn", "-dn",
-            "-metadata:s:v:0", "title=Japanese Hard-Subbed",
-            "-metadata:s:v:1", "title=Clean Video",
-            "-disposition:v:0", "default", "-disposition:v:1", "0",
-            "-disposition:a:0", "default",
-            outputFile.absolutePath
-        ))
-        var session = FFmpegKit.executeWithArguments(args.toTypedArray())
-        if (!ReturnCode.isSuccess(session.returnCode)) {
+        orderedAudio.forEach { baseArgs.addAll(listOf("-map", "0:${it.index}")) }
+
+        fun runEncode(hardware: Boolean) {
+            val args = baseArgs.toMutableList()
+            args.addAll(listOf("-map_metadata", "0", "-map_chapters", "0"))
+            if (hardware) {
+                args.addAll(listOf("-c:v", "h264_mediacodec", "-b:v", "5M"))
+            } else {
+                args.addAll(listOf("-c:v", "libx264", "-preset", "veryfast", "-crf", "22"))
+            }
+            args.addAll(listOf(
+                "-c:a", "copy", "-sn", "-dn",
+                "-metadata:s:v:0", "title=Japanese Hard-Subbed",
+                "-metadata:s:v:1", "title=Clean Video",
+                "-disposition:v:0", "default", "-disposition:v:1", "0",
+                "-disposition:a:0", "default",
+                outputFile.absolutePath
+            ))
+            val session = FFmpegKit.executeWithArguments(args.toTypedArray())
+            if (!ReturnCode.isSuccess(session.returnCode)) {
+                outputFile.delete()
+                throw IllegalStateException(session.output.takeLast(900))
+            }
+        }
+
+        // Try Android's hardware encoder first; some devices cannot run two encoders at once.
+        // If MediaCodec is unavailable or fails, retry with the bundled software encoder.
+        try {
+            runEncode(hardware = true)
+        } catch (hardwareError: Exception) {
             outputFile.delete()
-            throw IllegalStateException("Encoding failed: ${session.output.takeLast(900)}")
+            try {
+                runEncode(hardware = false)
+            } catch (softwareError: Exception) {
+                throw IllegalStateException(
+                    "Hardware and software encoding both failed. Hardware: ${hardwareError.message}. Software: ${softwareError.message}"
+                )
+            }
         }
         val validation = FFprobeKit.executeWithArguments(arrayOf(
             "-v", "error", "-show_streams", "-of", "json", outputFile.absolutePath
