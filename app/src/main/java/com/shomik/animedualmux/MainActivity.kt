@@ -1,5 +1,6 @@
 package com.shomik.animedualmux
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -191,6 +192,11 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Text("AnimeDualMux", style = MaterialTheme.typography.headlineLarge)
                     Text("Create one MKV with a Japanese hard-subbed video and a clean video track for dubs.")
+                    OutlinedButton(
+                        onClick = { startActivity(Intent(this@MainActivity, SubtitleExtractorActivity::class.java)) },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Open MKV Subtitle Extractor") }
                     Button(
                         onClick = { openInput.launch(arrayOf("video/x-matroska", "video/*", "application/octet-stream")) },
                         enabled = !busy,
