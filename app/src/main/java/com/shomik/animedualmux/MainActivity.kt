@@ -175,7 +175,7 @@ class MainActivity : ComponentActivity() {
                                         progress = index.toFloat() / chosen.size
                                         status = "Extracting ${index + 1} of ${chosen.size}: ${pair.first.name}"
                                     }
-                                    val output = extract(pair.first, pair.second)
+                                    val output = extract(pair.first, pair.second, convertAssToVtt)
                                     val base = pair.first.name.substringBeforeLast('.', pair.first.name)
                                         .replace(Regex("[^A-Za-z0-9._ -]"), "_")
                                     val title = pair.second.title.takeIf { it.isNotBlank() }
