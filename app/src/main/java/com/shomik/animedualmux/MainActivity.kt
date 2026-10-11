@@ -254,9 +254,9 @@ class MainActivity : ComponentActivity() {
                                         enabled = !busy
                                     )
                                     Column(Modifier.weight(1f)) {
-                                        Text("Convert ASS/SSA to WebVTT (.vtt)")
+                                        Text("Convert ASS/SSA to plain WebVTT (.vtt)")
                                         Text(
-                                            "Keeps dialogue and timing; ASS-only styling and effects may be lost.",
+                                            "Strips formatting tags so AniVault Player can apply its own styling.",
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
@@ -442,6 +442,17 @@ class MainActivity : ComponentActivity() {
             args += listOf("-c:s", "copy", output.absolutePath)
         }
         val session = FFmpegKit.executeWithArguments(args.toTypedArray())
+        if (converting && ReturnCode.isSuccess(session.returnCode) && output.exists() && output.length() > 0L) {
+            val cleaned = output.readLines().map { line ->
+                if (line.isBlank() || line.startsWith("WEBVTT") || line.contains("-->")) {
+                    line
+                } else {
+                    line.replace(Regex("""<[^>]*>"""), "")
+                        .replace(Regex("""\{\\[^}]*}"""), "")
+                }
+            }
+            output.writeText(cleaned.joinToString("\n") + "\n")
+        }
         if (!ReturnCode.isSuccess(session.returnCode) || !output.exists() || output.length() == 0L) {
             output.delete()
             error(
