@@ -148,9 +148,23 @@ class MainActivity : ComponentActivity() {
                         val result = createDualVideoMkv(source, tracks, audioIndex, subtitleIndex) { value, message ->
                             runOnUiThread { progress = value.coerceIn(0f, 1f); status = message }
                         }
+                        val outputSize = result.length().coerceAtLeast(1L)
+                        var savedBytes = 0L
                         contentResolver.openOutputStream(uri, "w").use { output ->
                             requireNotNull(output) { "Could not open destination file." }
-                            FileInputStream(result).use { input -> input.copyTo(output) }
+                            FileInputStream(result).use { input ->
+                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                                while (true) {
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    output.write(buffer, 0, count)
+                                    savedBytes += count
+                                    runOnUiThread {
+                                        progress = 0.92f + 0.08f * (savedBytes.toFloat() / outputSize).coerceIn(0f, 1f)
+                                        status = "Saving output file…"
+                                    }
+                                }
+                            }
                         }
                         result.delete()
                         runOnUiThread {
