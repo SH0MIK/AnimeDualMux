@@ -1,8 +1,8 @@
 package com.shomik.animedualmux
 
-import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -10,28 +10,27 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -42,90 +41,107 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
-private data class MediaTrack(
+private data class SubtitleTrack(
     val index: Int,
-    val type: String,
     val codec: String,
     val language: String,
-    val title: String,
-    val isDefault: Boolean,
-    val width: Int = 0,
-    val height: Int = 0
+    val title: String
 ) {
-    val label: String
-        get() = buildString {
-            append("#$index · ")
-            append(if (language == "und") "Unknown language" else language.uppercase(Locale.ROOT))
-            if (title.isNotBlank()) append(" · $title")
-            append(" · $codec")
-            if (type == "video" && width > 0) append(" · ${width}×${height}")
-            if (isDefault) append(" · default")
+    val extension: String
+        get() = when (codec.lowercase(Locale.ROOT)) {
+            "ass" -> "ass"
+            "ssa" -> "ssa"
+            "subrip" -> "srt"
+            "webvtt" -> "vtt"
+            "hdmv_pgs_subtitle" -> "sup"
+            "dvd_subtitle" -> "sub"
+            else -> "mks"
         }
+
+    val label: String
+        get() = "Track #$index · ${language.uppercase(Locale.ROOT)} · " +
+            (title.takeIf { it.isNotBlank() }?.let { "$it · " } ?: "") + codec
 }
+
+private data class ScannedVideo(
+    val file: File,
+    val name: String,
+    val tracks: List<SubtitleTrack>
+)
 
 class MainActivity : ComponentActivity() {
     private val worker = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { AnimeDualMuxScreen() }
+        setContent { ExtractorScreen() }
     }
 
     override fun onDestroy() {
-        worker.shutdown()
+        worker.shutdownNow()
         super.onDestroy()
     }
 
     @Composable
-    private fun AnimeDualMuxScreen() {
-        var inputFile by remember { mutableStateOf<File?>(null) }
-        var displayName by remember { mutableStateOf("") }
-        var tracks by remember { mutableStateOf<List<MediaTrack>>(emptyList()) }
-        var selectedAudio by remember { mutableStateOf<Int?>(null) }
-        var selectedSubtitle by remember { mutableStateOf<Int?>(null) }
+    private fun ExtractorScreen() {
+        var videos by remember { mutableStateOf<List<ScannedVideo>>(emptyList()) }
+        val selected = remember { mutableStateMapOf<String, Boolean>() }
+        var extractAll by remember { mutableStateOf(true) }
         var busy by remember { mutableStateOf(false) }
         var progress by remember { mutableStateOf(0f) }
-        var status by remember { mutableStateOf("Choose an MKV to begin.") }
-        var error by remember { mutableStateOf(false) }
+        var status by remember { mutableStateOf("Choose one MKV or select multiple MKV files.") }
+        var isError by remember { mutableStateOf(false) }
+        var pendingSingle by remember { mutableStateOf<Pair<ScannedVideo, SubtitleTrack>?>(null) }
 
-        val openInput = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) {
+        val singlePicker = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri != null) scanUris(listOf(uri), selected) { result, message ->
+                videos = result
+                status = message
+                isError = result.isEmpty()
+            }
+        }
+
+        val bulkPicker = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenMultipleDocuments()
+        ) { uris ->
+            if (uris.isNotEmpty()) scanUris(uris, selected) { result, message ->
+                videos = result
+                status = message
+                isError = result.isEmpty()
+            }
+        }
+
+        val saveSingle = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/octet-stream")
+        ) { uri ->
+            val pair = pendingSingle
+            if (uri != null && pair != null) {
                 busy = true
-                progress = 0.05f
-                error = false
-                status = "Copying selected file into app storage…"
+                isError = false
+                progress = 0.1f
                 worker.execute {
                     try {
-                        val name = queryDisplayName(uri) ?: "selected-video.mkv"
-                        val safeName = name.substringAfterLast('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
-                        val local = File(cacheDir, "input_${System.currentTimeMillis()}_$safeName")
-                        contentResolver.openInputStream(uri).use { source ->
-                            requireNotNull(source) { "Could not open the selected file." }
-                            local.outputStream().buffered().use { sink -> source.copyTo(sink) }
+                        val output = extract(pair.first, pair.second)
+                        contentResolver.openOutputStream(uri).use { stream ->
+                            requireNotNull(stream) { "Could not open destination." }
+                            FileInputStream(output).use { it.copyTo(stream) }
                         }
-                        runOnUiThread { status = "Scanning media tracks…"; progress = 0.14f }
-                        val probe = probe(local)
-                        val audio = probe.filter { it.type == "audio" }
-                        val subtitles = probe.filter { it.type == "subtitle" }
+                        output.delete()
                         runOnUiThread {
-                            inputFile = local
-                            displayName = name
-                            tracks = probe
-                            // Skip language guessing; let the user choose the exact tracks.
-                            selectedAudio = null
-                            selectedSubtitle = null
-                            status = "Found ${probe.size} tracks. Select the Japanese audio and subtitle manually."
-                            progress = 0f
+                            status = "Export complete: ${pair.second.label}"
+                            progress = 1f
                             busy = false
                         }
                     } catch (e: Exception) {
                         runOnUiThread {
-                            status = "Could not scan file: ${e.message ?: "unknown error"}"
-                            error = true
+                            status = "Export failed: ${e.message ?: "unknown error"}"
+                            isError = true
                             busy = false
                         }
                     }
@@ -133,51 +149,64 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        val saveOutput = rememberLauncherForActivityResult(
-            ActivityResultContracts.CreateDocument("video/x-matroska")
+        val saveBulk = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/zip")
         ) { uri ->
-            val source = inputFile
-            if (uri != null && source != null) {
-                busy = true
-                progress = 0.18f
-                error = false
-                status = "Preparing subtitle and encoding both video tracks. Keep the app open…"
-                val audioIndex = selectedAudio
-                val subtitleIndex = selectedSubtitle
-                worker.execute {
-                    try {
-                        val result = createDualVideoMkv(source, tracks, audioIndex, subtitleIndex) { value, message ->
-                            runOnUiThread { progress = value.coerceIn(0f, 1f); status = message }
-                        }
-                        val outputSize = result.length().coerceAtLeast(1L)
-                        var savedBytes = 0L
-                        contentResolver.openOutputStream(uri, "w").use { output ->
-                            requireNotNull(output) { "Could not open destination file." }
-                            FileInputStream(result).use { input ->
-                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                                while (true) {
-                                    val count = input.read(buffer)
-                                    if (count < 0) break
-                                    output.write(buffer, 0, count)
-                                    savedBytes += count
+            if (uri != null) {
+                val snapshot = videos
+                val chosen = snapshot.flatMap { video ->
+                    video.tracks.filter { extractAll || selected[key(video, it)] == true }
+                        .map { video to it }
+                }
+                if (chosen.isEmpty()) {
+                    status = "Select at least one subtitle track."
+                    isError = true
+                } else {
+                    busy = true
+                    isError = false
+                    progress = 0f
+                    worker.execute {
+                        try {
+                            val zipFile = File(cacheDir, "subtitle_export_${System.currentTimeMillis()}.zip")
+                            ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
+                                chosen.forEachIndexed { index, pair ->
                                     runOnUiThread {
-                                        progress = 0.92f + 0.08f * (savedBytes.toFloat() / outputSize).coerceIn(0f, 1f)
-                                        status = "Saving output file…"
+                                        progress = index.toFloat() / chosen.size
+                                        status = "Extracting ${index + 1} of ${chosen.size}: ${pair.first.name}"
                                     }
+                                    val output = extract(pair.first, pair.second)
+                                    val base = pair.first.name.substringBeforeLast('.', pair.first.name)
+                                        .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                    val title = pair.second.title.takeIf { it.isNotBlank() }
+                                        ?.replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                    val entry = buildString {
+                                        append(base).append("/")
+                                        append("track_").append(pair.second.index).append("_")
+                                        if (title != null) append(title).append("_")
+                                        append(pair.second.language).append(".").append(pair.second.extension)
+                                    }
+                                    zip.putNextEntry(ZipEntry(entry))
+                                    FileInputStream(output).use { it.copyTo(zip) }
+                                    zip.closeEntry()
+                                    output.delete()
                                 }
                             }
-                        }
-                        result.delete()
-                        runOnUiThread {
-                            status = "Success! Saved a validated dual-video MKV with 2 video tracks and no subtitle tracks."
-                            progress = 1f
-                            busy = false
-                        }
-                    } catch (e: Exception) {
-                        runOnUiThread {
-                            status = "Conversion failed: ${e.message ?: "unknown error"}"
-                            error = true
-                            busy = false
+                            contentResolver.openOutputStream(uri).use { stream ->
+                                requireNotNull(stream) { "Could not open ZIP destination." }
+                                FileInputStream(zipFile).use { it.copyTo(stream) }
+                            }
+                            zipFile.delete()
+                            runOnUiThread {
+                                status = "Bulk export complete: ${chosen.size} subtitle track(s) saved."
+                                progress = 1f
+                                busy = false
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                status = "Bulk export failed: ${e.message ?: "unknown error"}"
+                                isError = true
+                                busy = false
+                            }
                         }
                     }
                 }
@@ -185,263 +214,207 @@ class MainActivity : ComponentActivity() {
         }
 
         MaterialTheme {
-            Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
                 Column(
-                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("AnimeDualMux", style = MaterialTheme.typography.headlineLarge)
-                    Text("Create one MKV with a Japanese hard-subbed video and a clean video track for dubs.")
-                    OutlinedButton(
-                        onClick = { startActivity(Intent(this@MainActivity, SubtitleExtractorActivity::class.java)) },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Open MKV Subtitle Extractor") }
-                    Button(
-                        onClick = { openInput.launch(arrayOf("video/x-matroska", "video/*", "application/octet-stream")) },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text(if (inputFile == null) "Select MKV" else "Choose another file") }
+                    Text("MKV Subtitle Extractor", style = MaterialTheme.typography.headlineLarge)
+                    Text("Extract subtitle tracks from one or many MKV files. Processing stays on your device; videos are not re-encoded.")
 
-                    if (displayName.isNotBlank()) {
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(displayName, style = MaterialTheme.typography.titleMedium)
-                                Text("${tracks.count { it.type == "video" }} video · ${tracks.count { it.type == "audio" }} audio · ${tracks.count { it.type == "subtitle" }} subtitle tracks")
-                            }
-                        }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { singlePicker.launch(arrayOf("video/*", "application/octet-stream")) },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Select one MKV") }
+                        OutlinedButton(
+                            onClick = { bulkPicker.launch(arrayOf("video/*", "application/octet-stream")) },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Bulk select") }
                     }
 
-                    val audioTracks = tracks.filter { it.type == "audio" }
-                    val subtitleTracks = tracks.filter { it.type == "subtitle" }
-                    Text("Track selection", style = MaterialTheme.typography.titleLarge)
-                    Text("Choose the exact tracks manually. ASS/SSA subtitles are supported.")
-                    TrackPicker("Japanese audio", audioTracks, selectedAudio) { selectedAudio = it }
-                    TrackPicker("English subtitles to burn in", subtitleTracks, selectedSubtitle) { selectedSubtitle = it }
+                    if (videos.isNotEmpty()) {
+                        Text(
+                            "${videos.size} file(s) · ${videos.sumOf { it.tracks.size }} subtitle track(s)",
+                            style = MaterialTheme.typography.titleMedium
+                        )
 
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Output plan", style = MaterialTheme.typography.titleMedium)
-                            Text("Video 1: first source video with the selected subtitles burned in.")
-                            Text("Video 2: clean copy of the first source video.")
-                            Text("Audio: selected Japanese track first, then every other audio track. Subtitle streams are omitted.")
-                            Text("Important: MKV stores audio and video as separate tracks; it cannot reliably bind Japanese audio only to Video 1 and dubbed audio only to Video 2. Players may allow any audio track with either video.")
+                        Card(Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(10.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(selected = extractAll, onClick = { extractAll = true })
+                                    Text("Extract all tracks")
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(selected = !extractAll, onClick = { extractAll = false })
+                                    Text("Select tracks manually")
+                                }
+                            }
+                        }
+
+                        videos.forEach { video ->
+                            Card(Modifier.fillMaxWidth()) {
+                                Column(
+                                    Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Text(video.name, style = MaterialTheme.typography.titleMedium)
+                                    if (video.tracks.isEmpty()) Text("No subtitle tracks found.")
+                                    video.tracks.forEach { track ->
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Checkbox(
+                                                checked = selected[key(video, track)] == true,
+                                                onCheckedChange = { selected[key(video, track)] = it },
+                                                enabled = !extractAll && !busy
+                                            )
+                                            Text(track.label, modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        val chosenCount = videos.sumOf { video ->
+                            video.tracks.count { extractAll || selected[key(video, it)] == true }
+                        }
+                        Button(
+                            onClick = {
+                                val video = videos.singleOrNull()
+                                val tracks = video?.tracks?.filter {
+                                    extractAll || selected[key(video, it)] == true
+                                }.orEmpty()
+                                if (video != null && tracks.size == 1) {
+                                    pendingSingle = video to tracks.first()
+                                    saveSingle.launch(
+                                        video.name.substringBeforeLast('.', video.name) +
+                                            "_track_${tracks.first().index}.${tracks.first().extension}"
+                                    )
+                                } else if (chosenCount > 0) {
+                                    saveBulk.launch("subtitles_${videos.size}_files.zip")
+                                } else {
+                                    status = "No subtitle tracks selected."
+                                    isError = true
+                                }
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (videos.size == 1) "Export selected subtitle(s)" else "Export bulk ZIP")
                         }
                     }
-
-                    Button(
-                        onClick = {
-                            val source = inputFile
-                            if (source == null) {
-                                status = "Select an input file first."
-                                error = true
-                            } else if (selectedAudio == null) {
-                                status = "No audio track was detected. Choose a valid MKV."
-                                error = true
-                            } else if (selectedSubtitle == null) {
-                                status = "Choose a text-based English subtitle track to burn in."
-                                error = true
-                            } else {
-                                saveOutput.launch("AnimeDualMux-output.mkv")
-                            }
-                        },
-                        enabled = !busy && inputFile != null,
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Create dual-video MKV") }
 
                     if (busy) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                CircularProgressIndicator()
-                                Text(status, modifier = Modifier.weight(1f))
-                            }
-                            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-                            Text("${(progress * 100).toInt()}% complete", style = MaterialTheme.typography.labelMedium)
-                        }
-                    } else {
-                        Text(status, color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+                        LinearProgressIndicator(
+                            progress = { progress.coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
                     }
-                    Text("Large files need free storage for temporary copies and encoding. Keep the device plugged in during long conversions.", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-    }
-
-    private fun queryDisplayName(uri: Uri): String? {
-        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) return cursor.getString(0)
-        }
-        return null
-    }
-
-    private fun probeDurationMs(file: File): Long {
-        val session = FFprobeKit.executeWithArguments(arrayOf(
-            "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", file.absolutePath
-        ))
-        if (!ReturnCode.isSuccess(session.returnCode)) return 0L
-        return ((session.output.trim().toDoubleOrNull() ?: 0.0) * 1000.0).toLong()
-    }
-
-    private fun probe(file: File): List<MediaTrack> {
-        val session = FFprobeKit.executeWithArguments(arrayOf(
-            "-v", "error", "-show_streams", "-of", "json", file.absolutePath
-        ))
-        if (!ReturnCode.isSuccess(session.returnCode)) {
-            throw IllegalStateException("FFprobe could not read this file: ${session.output.take(300)}")
-        }
-        val streams = JSONObject(session.output).optJSONArray("streams")
-            ?: throw IllegalStateException("No media streams found.")
-        val result = mutableListOf<MediaTrack>()
-        for (i in 0 until streams.length()) {
-            val s = streams.getJSONObject(i)
-            val type = s.optString("codec_type")
-            if (type !in setOf("video", "audio", "subtitle")) continue
-            val tags = s.optJSONObject("tags") ?: JSONObject()
-            val disposition = s.optJSONObject("disposition") ?: JSONObject()
-            result += MediaTrack(
-                index = s.optInt("index", i),
-                type = type,
-                codec = s.optString("codec_name", "unknown"),
-                language = tags.optString("language", "und"),
-                title = tags.optString("title", ""),
-                isDefault = disposition.optInt("default", 0) == 1,
-                width = s.optInt("width", 0),
-                height = s.optInt("height", 0)
-            )
-        }
-        if (result.none { it.type == "video" }) throw IllegalStateException("No video stream was found.")
-        return result
-    }
-
-    private fun createDualVideoMkv(
-        input: File,
-        tracks: List<MediaTrack>,
-        japaneseAudioIndex: Int?,
-        subtitleIndex: Int?,
-        onProgress: (Float, String) -> Unit
-    ): File {
-        val audioTracks = tracks.filter { it.type == "audio" }
-        val japanese = audioTracks.firstOrNull { it.index == japaneseAudioIndex }
-            ?: throw IllegalStateException("Select a Japanese audio track.")
-        val subtitle = tracks.firstOrNull { it.type == "subtitle" && it.index == subtitleIndex }
-            ?: throw IllegalStateException("Select a subtitle track.")
-        val textCodecs = setOf("subrip", "ass", "ssa", "webvtt", "mov_text", "text")
-        if (subtitle.codec.lowercase(Locale.ROOT) !in textCodecs) {
-            throw IllegalStateException("The selected subtitle is image-based (${subtitle.codec}). Choose a text subtitle; OCR is not included yet.")
-        }
-        val outputDir = File(cacheDir, "exports").apply { mkdirs() }
-        val subtitleExtension = when (subtitle.codec.lowercase(Locale.ROOT)) {
-            "ssa" -> "ssa"
-            "subrip" -> "srt"
-            else -> "ass"
-        }
-        val subtitleFile = File(outputDir, "burn_${System.currentTimeMillis()}.$subtitleExtension")
-        val outputFile = File(outputDir, "dual_${System.currentTimeMillis()}.mkv")
-        onProgress(0.2f, "Extracting selected subtitle…")
-        val extract = FFmpegKit.executeWithArguments(arrayOf(
-            "-y", "-i", input.absolutePath, "-map", "0:${subtitle.index}", "-c:s", "copy", subtitleFile.absolutePath
-        ))
-        if (!ReturnCode.isSuccess(extract.returnCode) || !subtitleFile.exists() || subtitleFile.length() == 0L) {
-            throw IllegalStateException("Could not export the selected subtitle track: ${extract.output.takeLast(500)}")
-        }
-
-        val subtitlePath = subtitleFile.absolutePath
-            .replace("\\", "\\\\")
-            .replace(":", "\\:")
-            .replace("'", "\\'")
-        val baseArgs = mutableListOf(
-            "-y", "-i", input.absolutePath,
-            "-filter_complex", "[0:v:0]split=2[hardbase][clean];[hardbase]subtitles=filename='$subtitlePath'[hard]",
-            "-map", "[hard]", "-map", "[clean]"
-        )
-        // Matroska audio/video tracks are independent. Preserve all audio, Japanese first.
-        val orderedAudio = listOf(japanese) + audioTracks.filter { it.index != japanese.index }
-        orderedAudio.forEach { baseArgs.addAll(listOf("-map", "0:${it.index}")) }
-        baseArgs.addAll(listOf(
-            "-map_metadata", "0", "-map_chapters", "0",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-            "-c:a", "copy", "-sn", "-dn",
-            "-max_muxing_queue_size", "2048",
-            "-metadata:s:v:0", "title=Japanese Hard-Subbed",
-            "-metadata:s:v:1", "title=Clean Video",
-            "-disposition:v:0", "default", "-disposition:v:1", "0",
-            "-disposition:a:0", "default",
-            outputFile.absolutePath
-        ))
-        // Software encoding is more compatible than running two hardware encoders on a phone.
-        onProgress(0.25f, "Encoding both video tracks…")
-        val durationMs = probeDurationMs(input)
-        val latch = CountDownLatch(1)
-        var completedSession: com.arthenica.ffmpegkit.FFmpegSession? = null
-        FFmpegKit.executeWithArgumentsAsync(
-            baseArgs.toTypedArray(),
-            { session -> completedSession = session; latch.countDown() },
-            null,
-            { stats ->
-                val fraction = if (durationMs > 0L) (stats.time.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
-                onProgress(0.25f + fraction * 0.6f, "Encoding video tracks… ${(fraction * 100).toInt()}%")
-            }
-        )
-        if (!latch.await(24, TimeUnit.HOURS)) {
-            outputFile.delete()
-            subtitleFile.delete()
-            throw IllegalStateException("Encoding timed out after 24 hours.")
-        }
-        val session = completedSession
-        if (session == null || !ReturnCode.isSuccess(session.returnCode)) {
-            outputFile.delete()
-            subtitleFile.delete()
-            throw IllegalStateException(
-                "FFmpeg could not create the MKV. The selected subtitle must be text-based and the build must include the subtitles/libass filter. Details: ${session?.output?.takeLast(1800) ?: "No FFmpeg session result."}"
-            )
-        }
-        onProgress(0.87f, "Validating output tracks…")
-        val validation = FFprobeKit.executeWithArguments(arrayOf(
-            "-v", "error", "-show_streams", "-of", "json", outputFile.absolutePath
-        ))
-        if (!ReturnCode.isSuccess(validation.returnCode)) {
-            outputFile.delete()
-            throw IllegalStateException("Output validation failed.")
-        }
-        onProgress(0.9f, "Checking video, audio, and subtitle tracks…")
-        val streams = JSONObject(validation.output).optJSONArray("streams") ?: throw IllegalStateException("Invalid output.")
-        val videoCount = (0 until streams.length()).count { streams.getJSONObject(it).optString("codec_type") == "video" }
-        val subtitleCount = (0 until streams.length()).count { streams.getJSONObject(it).optString("codec_type") == "subtitle" }
-        val audioCount = (0 until streams.length()).count { streams.getJSONObject(it).optString("codec_type") == "audio" }
-        subtitleFile.delete()
-        onProgress(0.92f, "Output validated. Preparing to save…")
-        if (videoCount != 2 || subtitleCount != 0 || audioCount != audioTracks.size) {
-            outputFile.delete()
-            throw IllegalStateException("Validation mismatch: videos=$videoCount, audio=$audioCount, subtitles=$subtitleCount.")
-        }
-        return outputFile
-    }
-}
-
-@Composable
-private fun TrackPicker(
-    title: String,
-    tracks: List<MediaTrack>,
-    selectedIndex: Int?,
-    onSelect: (Int) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val selected = tracks.firstOrNull { it.index == selectedIndex }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(title, style = MaterialTheme.typography.titleSmall)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = { expanded = true }, enabled = tracks.isNotEmpty()) {
-                Text(selected?.label ?: if (tracks.isEmpty()) "No tracks found" else "Choose track")
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                tracks.forEach { track ->
-                    DropdownMenuItem(
-                        text = { Text(track.label) },
-                        onClick = { onSelect(track.index); expanded = false }
+                    Text(
+                        status,
+                        color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "ASS/SSA styling is preserved when copied directly. PGS can be exported as SUP; bitmap subtitles are not OCR-converted to text.",
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
             }
         }
+    }
+
+    private fun key(video: ScannedVideo, track: SubtitleTrack): String =
+        video.file.absolutePath + ":" + track.index
+
+    private fun scanUris(
+        uris: List<Uri>,
+        selected: SnapshotStateMap<String, Boolean>,
+        done: (List<ScannedVideo>, String) -> Unit
+    ) {
+        done(emptyList(), "Scanning ${uris.size} file(s)…")
+        worker.execute {
+            val scanned = mutableListOf<ScannedVideo>()
+            val failures = mutableListOf<String>()
+            uris.forEachIndexed { index, uri ->
+                var localFile: File? = null
+                try {
+                    val name = contentResolver.query(
+                        uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    } ?: "video_${index + 1}.mkv"
+
+                    localFile = File(cacheDir, "subtitle_input_${System.currentTimeMillis()}_${index}.mkv")
+                    contentResolver.openInputStream(uri).use { input ->
+                        requireNotNull(input) { "Could not read the selected file." }
+                        localFile.outputStream().buffered().use { output -> input.copyTo(output) }
+                    }
+
+                    val probe = FFprobeKit.executeWithArguments(
+                        arrayOf("-v", "error", "-show_streams", "-of", "json", localFile.absolutePath)
+                    )
+                    check(ReturnCode.isSuccess(probe.returnCode)) {
+                        "FFprobe could not read $name: ${probe.output.take(160)}"
+                    }
+
+                    val streams = JSONObject(probe.output).optJSONArray("streams")
+                    val tracks = mutableListOf<SubtitleTrack>()
+                    if (streams != null) {
+                        for (i in 0 until streams.length()) {
+                            val stream = streams.getJSONObject(i)
+                            if (stream.optString("codec_type") != "subtitle") continue
+                            val tags = stream.optJSONObject("tags") ?: JSONObject()
+                            tracks += SubtitleTrack(
+                                index = stream.optInt("index", i),
+                                codec = stream.optString("codec_name", "unknown"),
+                                language = tags.optString("language", "und"),
+                                title = tags.optString("title", "")
+                            )
+                        }
+                    }
+                    scanned += ScannedVideo(localFile, name, tracks)
+                } catch (e: Exception) {
+                    localFile?.delete()
+                    failures += e.message ?: "Could not scan file"
+                }
+            }
+
+            runOnUiThread {
+                selected.clear()
+                scanned.forEach { video ->
+                    video.tracks.forEach { selected[key(video, it)] = true }
+                }
+                done(
+                    scanned,
+                    if (failures.isEmpty()) "Scan complete. Review tracks, then export."
+                    else "Scanned ${scanned.size} file(s); ${failures.size} failed: ${failures.take(2).joinToString()}"
+                )
+            }
+        }
+    }
+
+    private fun extract(video: ScannedVideo, track: SubtitleTrack): File {
+        val output = File(
+            cacheDir,
+            "subtitle_track_${track.index}_${System.currentTimeMillis()}.${track.extension}"
+        )
+        val session = FFmpegKit.executeWithArguments(
+            arrayOf(
+                "-y", "-v", "error", "-i", video.file.absolutePath,
+                "-map", "0:${track.index}", "-c:s", "copy", output.absolutePath
+            )
+        )
+        if (!ReturnCode.isSuccess(session.returnCode) || !output.exists() || output.length() == 0L) {
+            output.delete()
+            error(
+                "Track #${track.index} (${track.codec}) failed: " +
+                    (session.failStackTrace ?: session.output.take(200))
+            )
+        }
+        return output
     }
 }
