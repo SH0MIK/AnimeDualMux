@@ -420,6 +420,66 @@ class MainActivity : ComponentActivity() {
             track.extension
         }
 
+    private fun convertAssToPlainVtt(source: File, destination: File) {
+        val lines = source.readText(Charsets.UTF_8)
+            .removePrefix("\uFEFF")
+            .lines()
+        var inEvents = false
+        var fields = emptyList<String>()
+        val cues = mutableListOf<String>()
+
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                inEvents = trimmed.equals("[Events]", ignoreCase = true)
+                continue
+            }
+            if (!inEvents) continue
+
+            if (trimmed.startsWith("Format:", ignoreCase = true)) {
+                fields = trimmed.substringAfter(":").split(",").map {
+                    it.trim().lowercase(Locale.ROOT)
+                }
+                continue
+            }
+            if (!trimmed.startsWith("Dialogue:", ignoreCase = true) || fields.isEmpty()) continue
+
+            val values = trimmed.substringAfter(":").trimStart().split(",", limit = fields.size)
+            if (values.size != fields.size) continue
+            val startIndex = fields.indexOf("start")
+            val endIndex = fields.indexOf("end")
+            val textIndex = fields.indexOf("text")
+            if (startIndex < 0 || endIndex < 0 || textIndex < 0) continue
+
+            val start = assTimeToVtt(values[startIndex].trim())
+            val end = assTimeToVtt(values[endIndex].trim())
+            val dialogue = values[textIndex]
+                .replace(Regex("""\{[^}]*}"""), "")
+                .replace(Regex("""<[^>]*>"""), "")
+                .replace("\\N", "\n")
+                .replace("\\n", "\n")
+                .replace("\\h", " ")
+                .trim()
+            if (dialogue.isEmpty()) continue
+            cues += "$start --> $end\n$dialogue"
+        }
+
+        check(cues.isNotEmpty()) { "No readable ASS/SSA dialogue cues were found." }
+        destination.writeText("WEBVTT\n\n" + cues.joinToString("\n\n") + "\n", Charsets.UTF_8)
+    }
+
+    private fun assTimeToVtt(value: String): String {
+        val match = Regex("""^(\\d+):(\\d{2}):(\\d{2})[.](\\d{2})$""").matchEntire(value)
+            ?: error("Unrecognized ASS timestamp: $value")
+        val hours = match.groupValues[1].toLong()
+        val minutes = match.groupValues[2].toLong()
+        val seconds = match.groupValues[3].toLong()
+        val centiseconds = match.groupValues[4].toLong()
+        return "%02d:%02d:%02d.%03d".format(
+            Locale.ROOT, hours, minutes, seconds, centiseconds * 10
+        )
+    }
+
     private fun extract(
         video: ScannedVideo,
         track: SubtitleTrack,
@@ -432,26 +492,32 @@ class MainActivity : ComponentActivity() {
             cacheDir,
             "subtitle_track_${track.index}_${System.currentTimeMillis()}.$extension"
         )
-        val args = mutableListOf(
-            "-y", "-v", "error", "-i", video.file.absolutePath,
-            "-map", "0:${track.index}"
-        )
-        if (converting) {
-            args += listOf("-c:s", "webvtt", "-f", "webvtt", output.absolutePath)
+        val intermediate = if (converting) {
+            File(cacheDir, "subtitle_source_${track.index}_${System.currentTimeMillis()}.ass")
         } else {
-            args += listOf("-c:s", "copy", output.absolutePath)
+            output
         }
-        val session = FFmpegKit.executeWithArguments(args.toTypedArray())
-        if (converting && ReturnCode.isSuccess(session.returnCode) && output.exists() && output.length() > 0L) {
-            val cleaned = output.readLines().map { line ->
-                if (line.isBlank() || line.startsWith("WEBVTT") || line.contains("-->")) {
-                    line
-                } else {
-                    line.replace(Regex("""<[^>]*>"""), "")
-                        .replace(Regex("""\{\\[^}]*}"""), "")
-                }
+        val args = arrayOf(
+            "-y", "-v", "error", "-i", video.file.absolutePath,
+            "-map", "0:${track.index}", "-c:s", "copy", intermediate.absolutePath
+        )
+        val session = FFmpegKit.executeWithArguments(args)
+        if (!ReturnCode.isSuccess(session.returnCode) ||
+            !intermediate.exists() || intermediate.length() == 0L
+        ) {
+            output.delete()
+            intermediate.delete()
+            error(
+                "Track #${track.index} (${track.codec}) failed: " +
+                    (session.failStackTrace ?: session.output.take(200))
+            )
+        }
+        if (converting) {
+            try {
+                convertAssToPlainVtt(intermediate, output)
+            } finally {
+                intermediate.delete()
             }
-            output.writeText(cleaned.joinToString("\n") + "\n")
         }
         if (!ReturnCode.isSuccess(session.returnCode) || !output.exists() || output.length() == 0L) {
             output.delete()
