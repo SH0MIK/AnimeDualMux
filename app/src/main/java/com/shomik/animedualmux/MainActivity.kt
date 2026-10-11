@@ -24,6 +24,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -84,12 +85,14 @@ class MainActivity : ComponentActivity() {
         var selectedAudio by remember { mutableStateOf<Int?>(null) }
         var selectedSubtitle by remember { mutableStateOf<Int?>(null) }
         var busy by remember { mutableStateOf(false) }
+        var progress by remember { mutableStateOf(0f) }
         var status by remember { mutableStateOf("Choose an MKV to begin.") }
         var error by remember { mutableStateOf(false) }
 
         val openInput = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
                 busy = true
+                progress = 0.05f
                 error = false
                 status = "Copying selected file into app storage…"
                 worker.execute {
@@ -101,6 +104,7 @@ class MainActivity : ComponentActivity() {
                             requireNotNull(source) { "Could not open the selected file." }
                             local.outputStream().buffered().use { sink -> source.copyTo(sink) }
                         }
+                        runOnUiThread { status = "Scanning media tracks…"; progress = 0.14f }
                         val probe = probe(local)
                         val audio = probe.filter { it.type == "audio" }
                         val subtitles = probe.filter { it.type == "subtitle" }
@@ -112,6 +116,7 @@ class MainActivity : ComponentActivity() {
                             selectedAudio = null
                             selectedSubtitle = null
                             status = "Found ${probe.size} tracks. Select the Japanese audio and subtitle manually."
+                            progress = 0f
                             busy = false
                         }
                     } catch (e: Exception) {
@@ -131,6 +136,7 @@ class MainActivity : ComponentActivity() {
             val source = inputFile
             if (uri != null && source != null) {
                 busy = true
+                progress = 0.18f
                 error = false
                 status = "Preparing subtitle and encoding both video tracks. Keep the app open…"
                 val audioIndex = selectedAudio
@@ -145,6 +151,7 @@ class MainActivity : ComponentActivity() {
                         result.delete()
                         runOnUiThread {
                             status = "Success! Saved a validated dual-video MKV with 2 video tracks and no subtitle tracks."
+                            progress = 1f
                             busy = false
                         }
                     } catch (e: Exception) {
@@ -219,9 +226,13 @@ class MainActivity : ComponentActivity() {
                     ) { Text("Create dual-video MKV") }
 
                     if (busy) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            CircularProgressIndicator()
-                            Text(status)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                CircularProgressIndicator()
+                                Text(status, modifier = Modifier.weight(1f))
+                            }
+                            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                            Text("${(progress * 100).toInt()}% complete", style = MaterialTheme.typography.labelMedium)
                         }
                     } else {
                         Text(status, color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
