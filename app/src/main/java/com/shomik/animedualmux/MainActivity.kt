@@ -108,16 +108,10 @@ class MainActivity : ComponentActivity() {
                             inputFile = local
                             displayName = name
                             tracks = probe
-                            selectedAudio = audio.firstOrNull { it.language.equals("jpn", true) || it.language.equals("ja", true) }
-                                ?.index ?: audio.firstOrNull { it.title.contains("japanese", true) || it.title.contains("日本語") }?.index
-                                ?: audio.firstOrNull { it.isDefault }?.index ?: audio.firstOrNull()?.index
-                            selectedSubtitle = subtitles.firstOrNull {
-                                (it.language.equals("eng", true) || it.language.equals("en", true)) &&
-                                    it.codec.lowercase(Locale.ROOT) in setOf("subrip", "ass", "ssa", "webvtt", "mov_text", "text")
-                            }?.index ?: subtitles.firstOrNull {
-                                it.codec.lowercase(Locale.ROOT) in setOf("subrip", "ass", "ssa", "webvtt", "mov_text", "text")
-                            }?.index
-                            status = "Scanned ${probe.size} tracks. Review the automatic selections below."
+                            // Skip language guessing; let the user choose the exact tracks.
+                            selectedAudio = null
+                            selectedSubtitle = null
+                            status = "Found ${probe.size} tracks. Select the Japanese audio and subtitle manually."
                             busy = false
                         }
                     } catch (e: Exception) {
@@ -190,7 +184,7 @@ class MainActivity : ComponentActivity() {
                     val audioTracks = tracks.filter { it.type == "audio" }
                     val subtitleTracks = tracks.filter { it.type == "subtitle" }
                     Text("Track selection", style = MaterialTheme.typography.titleLarge)
-                    Text("Auto-detection is a starting point. You can override either choice before encoding.")
+                    Text("Choose the exact tracks manually. ASS/SSA subtitles are supported.")
                     TrackPicker("Japanese audio", audioTracks, selectedAudio) { selectedAudio = it }
                     TrackPicker("English subtitles to burn in", subtitleTracks, selectedSubtitle) { selectedSubtitle = it }
 
@@ -292,10 +286,15 @@ class MainActivity : ComponentActivity() {
             throw IllegalStateException("The selected subtitle is image-based (${subtitle.codec}). Choose a text subtitle; OCR is not included yet.")
         }
         val outputDir = File(cacheDir, "exports").apply { mkdirs() }
-        val subtitleFile = File(outputDir, "burn_${System.currentTimeMillis()}.ass")
+        val subtitleExtension = when (subtitle.codec.lowercase(Locale.ROOT)) {
+            "ssa" -> "ssa"
+            "subrip" -> "srt"
+            else -> "ass"
+        }
+        val subtitleFile = File(outputDir, "burn_${System.currentTimeMillis()}.$subtitleExtension")
         val outputFile = File(outputDir, "dual_${System.currentTimeMillis()}.mkv")
         val extract = FFmpegKit.executeWithArguments(arrayOf(
-            "-y", "-i", input.absolutePath, "-map", "0:${subtitle.index}", "-c:s", "ass", subtitleFile.absolutePath
+            "-y", "-i", input.absolutePath, "-map", "0:${subtitle.index}", "-c:s", "copy", subtitleFile.absolutePath
         ))
         if (!ReturnCode.isSuccess(extract.returnCode) || !subtitleFile.exists() || subtitleFile.length() == 0L) {
             throw IllegalStateException("Could not export the selected subtitle track: ${extract.output.takeLast(500)}")
@@ -307,48 +306,31 @@ class MainActivity : ComponentActivity() {
             .replace("'", "\\'")
         val baseArgs = mutableListOf(
             "-y", "-i", input.absolutePath,
-            "-filter_complex", "[0:v:0]split=2[hardbase][clean];[hardbase]subtitles='$subtitlePath'[hard]",
+            "-filter_complex", "[0:v:0]split=2[hardbase][clean];[hardbase]subtitles=filename='$subtitlePath'[hard]",
             "-map", "[hard]", "-map", "[clean]"
         )
+        // Matroska audio/video tracks are independent. Preserve all audio, Japanese first.
         val orderedAudio = listOf(japanese) + audioTracks.filter { it.index != japanese.index }
         orderedAudio.forEach { baseArgs.addAll(listOf("-map", "0:${it.index}")) }
-
-        fun runEncode(hardware: Boolean) {
-            val args = baseArgs.toMutableList()
-            args.addAll(listOf("-map_metadata", "0", "-map_chapters", "0"))
-            if (hardware) {
-                args.addAll(listOf("-c:v", "h264_mediacodec", "-b:v", "5M"))
-            } else {
-                args.addAll(listOf("-c:v", "libx264", "-preset", "veryfast", "-crf", "22"))
-            }
-            args.addAll(listOf(
-                "-c:a", "copy", "-sn", "-dn",
-                "-metadata:s:v:0", "title=Japanese Hard-Subbed",
-                "-metadata:s:v:1", "title=Clean Video",
-                "-disposition:v:0", "default", "-disposition:v:1", "0",
-                "-disposition:a:0", "default",
-                outputFile.absolutePath
-            ))
-            val session = FFmpegKit.executeWithArguments(args.toTypedArray())
-            if (!ReturnCode.isSuccess(session.returnCode)) {
-                outputFile.delete()
-                throw IllegalStateException(session.output.takeLast(900))
-            }
-        }
-
-        // Try Android's hardware encoder first; some devices cannot run two encoders at once.
-        // If MediaCodec is unavailable or fails, retry with the bundled software encoder.
-        try {
-            runEncode(hardware = true)
-        } catch (hardwareError: Exception) {
+        baseArgs.addAll(listOf(
+            "-map_metadata", "0", "-map_chapters", "0",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-c:a", "copy", "-sn", "-dn",
+            "-max_muxing_queue_size", "2048",
+            "-metadata:s:v:0", "title=Japanese Hard-Subbed",
+            "-metadata:s:v:1", "title=Clean Video",
+            "-disposition:v:0", "default", "-disposition:v:1", "0",
+            "-disposition:a:0", "default",
+            outputFile.absolutePath
+        ))
+        // Software encoding is more compatible than running two hardware encoders on a phone.
+        val session = FFmpegKit.executeWithArguments(baseArgs.toTypedArray())
+        if (!ReturnCode.isSuccess(session.returnCode)) {
             outputFile.delete()
-            try {
-                runEncode(hardware = false)
-            } catch (softwareError: Exception) {
-                throw IllegalStateException(
-                    "Hardware and software encoding both failed. Hardware: ${hardwareError.message}. Software: ${softwareError.message}"
-                )
-            }
+            subtitleFile.delete()
+            throw IllegalStateException(
+                "FFmpeg could not create the MKV. The selected subtitle must be text-based and the build must include the subtitles/libass filter. Details: ${session.output.takeLast(1800)}"
+            )
         }
         val validation = FFprobeKit.executeWithArguments(arrayOf(
             "-v", "error", "-show_streams", "-of", "json", outputFile.absolutePath
