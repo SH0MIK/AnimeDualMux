@@ -8,7 +8,8 @@ Android app for exporting subtitle tracks from MKV files. The app processes file
 - Select multiple MKV files and export their subtitle tracks into one ZIP archive.
 - Extract all tracks or manually choose tracks per file.
 - Shows track index, codec, language and track title when available.
-- Uses FFprobe for track discovery and FFmpeg stream copy for extraction.
+- Uses FFprobe for track discovery and FFmpeg for extraction/conversion.
+- Optionally converts ASS/SSA tracks to plain WebVTT (`.vtt`) and strips subtitle formatting tags, leaving AniVault Player free to apply its own styling.
 - Supports ASS/SSA, SubRip/SRT, WebVTT and supported image-based subtitle streams. Image-based tracks are not OCR-converted to text.
 
 ## Build an APK
@@ -18,6 +19,6 @@ Every push, pull request, and manual workflow dispatch runs the **Android APK** 
 ## Notes
 
 - Large MKV files are copied into app cache before scanning; make sure the device has enough free storage.
-- ASS/SSA formatting is retained when the stream can be copied directly.
+- With ASS/SSA-to-VTT conversion enabled, dialogue and timing are retained where supported, while formatting tags are removed. Disable conversion to preserve the original ASS/SSA track.
 - Subtitle extraction does not re-encode the video.
 - The project uses the FFmpegKit-maintained GPL package. Review its GPL-3.0 terms and third-party notices before distributing builds.
