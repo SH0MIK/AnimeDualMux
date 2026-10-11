@@ -41,7 +41,9 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 private data class MediaTrack(
     val index: Int,
@@ -143,7 +145,9 @@ class MainActivity : ComponentActivity() {
                 val subtitleIndex = selectedSubtitle
                 worker.execute {
                     try {
-                        val result = createDualVideoMkv(source, tracks, audioIndex, subtitleIndex)
+                        val result = createDualVideoMkv(source, tracks, audioIndex, subtitleIndex) { value, message ->
+                            runOnUiThread { progress = value.coerceIn(0f, 1f); status = message }
+                        }
                         contentResolver.openOutputStream(uri, "w").use { output ->
                             requireNotNull(output) { "Could not open destination file." }
                             FileInputStream(result).use { input -> input.copyTo(output) }
@@ -250,6 +254,15 @@ class MainActivity : ComponentActivity() {
         return null
     }
 
+    private fun probeDurationMs(file: File): Long {
+        val session = FFprobeKit.executeWithArguments(arrayOf(
+            "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", file.absolutePath
+        ))
+        if (!ReturnCode.isSuccess(session.returnCode)) return 0L
+        return ((session.output.trim().toDoubleOrNull() ?: 0.0) * 1000.0).toLong()
+    }
+
     private fun probe(file: File): List<MediaTrack> {
         val session = FFprobeKit.executeWithArguments(arrayOf(
             "-v", "error", "-show_streams", "-of", "json", file.absolutePath
@@ -285,7 +298,8 @@ class MainActivity : ComponentActivity() {
         input: File,
         tracks: List<MediaTrack>,
         japaneseAudioIndex: Int?,
-        subtitleIndex: Int?
+        subtitleIndex: Int?,
+        onProgress: (Float, String) -> Unit
     ): File {
         val audioTracks = tracks.filter { it.type == "audio" }
         val japanese = audioTracks.firstOrNull { it.index == japaneseAudioIndex }
@@ -304,6 +318,7 @@ class MainActivity : ComponentActivity() {
         }
         val subtitleFile = File(outputDir, "burn_${System.currentTimeMillis()}.$subtitleExtension")
         val outputFile = File(outputDir, "dual_${System.currentTimeMillis()}.mkv")
+        onProgress(0.2f, "Extracting selected subtitle…")
         val extract = FFmpegKit.executeWithArguments(arrayOf(
             "-y", "-i", input.absolutePath, "-map", "0:${subtitle.index}", "-c:s", "copy", subtitleFile.absolutePath
         ))
@@ -335,14 +350,33 @@ class MainActivity : ComponentActivity() {
             outputFile.absolutePath
         ))
         // Software encoding is more compatible than running two hardware encoders on a phone.
-        val session = FFmpegKit.executeWithArguments(baseArgs.toTypedArray())
-        if (!ReturnCode.isSuccess(session.returnCode)) {
+        onProgress(0.25f, "Encoding both video tracks…")
+        val durationMs = probeDurationMs(input)
+        val latch = CountDownLatch(1)
+        var completedSession: com.arthenica.ffmpegkit.FFmpegSession? = null
+        FFmpegKit.executeWithArgumentsAsync(
+            baseArgs.toTypedArray(),
+            { session -> completedSession = session; latch.countDown() },
+            null,
+            { stats ->
+                val fraction = if (durationMs > 0L) (stats.time.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+                onProgress(0.25f + fraction * 0.6f, "Encoding video tracks… ${(fraction * 100).toInt()}%")
+            }
+        )
+        if (!latch.await(24, TimeUnit.HOURS)) {
+            outputFile.delete()
+            subtitleFile.delete()
+            throw IllegalStateException("Encoding timed out after 24 hours.")
+        }
+        val session = completedSession
+        if (session == null || !ReturnCode.isSuccess(session.returnCode)) {
             outputFile.delete()
             subtitleFile.delete()
             throw IllegalStateException(
-                "FFmpeg could not create the MKV. The selected subtitle must be text-based and the build must include the subtitles/libass filter. Details: ${session.output.takeLast(1800)}"
+                "FFmpeg could not create the MKV. The selected subtitle must be text-based and the build must include the subtitles/libass filter. Details: ${session?.output?.takeLast(1800) ?: "No FFmpeg session result."}"
             )
         }
+        onProgress(0.87f, "Validating output tracks…")
         val validation = FFprobeKit.executeWithArguments(arrayOf(
             "-v", "error", "-show_streams", "-of", "json", outputFile.absolutePath
         ))
@@ -350,11 +384,13 @@ class MainActivity : ComponentActivity() {
             outputFile.delete()
             throw IllegalStateException("Output validation failed.")
         }
+        onProgress(0.9f, "Checking video, audio, and subtitle tracks…")
         val streams = JSONObject(validation.output).optJSONArray("streams") ?: throw IllegalStateException("Invalid output.")
         val videoCount = (0 until streams.length()).count { streams.getJSONObject(it).optString("codec_type") == "video" }
         val subtitleCount = (0 until streams.length()).count { streams.getJSONObject(it).optString("codec_type") == "subtitle" }
         val audioCount = (0 until streams.length()).count { streams.getJSONObject(it).optString("codec_type") == "audio" }
         subtitleFile.delete()
+        onProgress(0.92f, "Output validated. Preparing to save…")
         if (videoCount != 2 || subtitleCount != 0 || audioCount != audioTracks.size) {
             outputFile.delete()
             throw IllegalStateException("Validation mismatch: videos=$videoCount, audio=$audioCount, subtitles=$subtitleCount.")
