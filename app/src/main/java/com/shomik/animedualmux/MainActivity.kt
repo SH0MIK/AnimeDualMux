@@ -469,7 +469,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun assTimeToVtt(value: String): String {
-        val match = Regex("""^(\\d+):(\\d{2}):(\\d{2})[.](\\d{2})$""").matchEntire(value)
+        val match = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{2})$""").matchEntire(value)
             ?: error("Unrecognized ASS timestamp: $value")
         val hours = match.groupValues[1].toLong()
         val minutes = match.groupValues[2].toLong()
