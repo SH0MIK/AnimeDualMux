@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
         var videos by remember { mutableStateOf<List<ScannedVideo>>(emptyList()) }
         val selected = remember { mutableStateMapOf<String, Boolean>() }
         var extractAll by remember { mutableStateOf(true) }
+        var convertAssToVtt by remember { mutableStateOf(true) }
         var busy by remember { mutableStateOf(false) }
         var progress by remember { mutableStateOf(0f) }
         var status by remember { mutableStateOf("Choose one MKV or select multiple MKV files.") }
@@ -127,7 +128,7 @@ class MainActivity : ComponentActivity() {
                 progress = 0.1f
                 worker.execute {
                     try {
-                        val output = extract(pair.first, pair.second)
+                        val output = extract(pair.first, pair.second, convertAssToVtt)
                         contentResolver.openOutputStream(uri).use { stream ->
                             requireNotNull(stream) { "Could not open destination." }
                             FileInputStream(output).use { it.copyTo(stream) }
@@ -183,7 +184,7 @@ class MainActivity : ComponentActivity() {
                                         append(base).append("/")
                                         append("track_").append(pair.second.index).append("_")
                                         if (title != null) append(title).append("_")
-                                        append(pair.second.language).append(".").append(pair.second.extension)
+                                        append(pair.second.language).append(".").append(exportExtension(pair.second, convertAssToVtt))
                                     }
                                     zip.putNextEntry(ZipEntry(entry))
                                     FileInputStream(output).use { it.copyTo(zip) }
@@ -247,6 +248,20 @@ class MainActivity : ComponentActivity() {
                         Card(Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(10.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(
+                                        checked = convertAssToVtt,
+                                        onCheckedChange = { convertAssToVtt = it },
+                                        enabled = !busy
+                                    )
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Convert ASS/SSA to WebVTT (.vtt)")
+                                        Text(
+                                            "Keeps dialogue and timing; ASS-only styling and effects may be lost.",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     RadioButton(selected = extractAll, onClick = { extractAll = true })
                                     Text("Extract all tracks")
                                 }
@@ -292,7 +307,8 @@ class MainActivity : ComponentActivity() {
                                     pendingSingle = video to tracks.first()
                                     saveSingle.launch(
                                         video.name.substringBeforeLast('.', video.name) +
-                                            "_track_${tracks.first().index}.${tracks.first().extension}"
+                                            "_track_${tracks.first().index}." +
+                                            exportExtension(tracks.first(), convertAssToVtt)
                                     )
                                 } else if (chosenCount > 0) {
                                     saveBulk.launch("subtitles_${videos.size}_files.zip")
@@ -397,17 +413,35 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun extract(video: ScannedVideo, track: SubtitleTrack): File {
+    private fun exportExtension(track: SubtitleTrack, convertAssToVtt: Boolean): String =
+        if (convertAssToVtt && track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")) {
+            "vtt"
+        } else {
+            track.extension
+        }
+
+    private fun extract(
+        video: ScannedVideo,
+        track: SubtitleTrack,
+        convertAssToVtt: Boolean
+    ): File {
+        val converting = convertAssToVtt &&
+            track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")
+        val extension = exportExtension(track, convertAssToVtt)
         val output = File(
             cacheDir,
-            "subtitle_track_${track.index}_${System.currentTimeMillis()}.${track.extension}"
+            "subtitle_track_${track.index}_${System.currentTimeMillis()}.$extension"
         )
-        val session = FFmpegKit.executeWithArguments(
-            arrayOf(
-                "-y", "-v", "error", "-i", video.file.absolutePath,
-                "-map", "0:${track.index}", "-c:s", "copy", output.absolutePath
-            )
+        val args = mutableListOf(
+            "-y", "-v", "error", "-i", video.file.absolutePath,
+            "-map", "0:${track.index}"
         )
+        if (converting) {
+            args += listOf("-c:s", "webvtt", "-f", "webvtt", output.absolutePath)
+        } else {
+            args += listOf("-c:s", "copy", output.absolutePath)
+        }
+        val session = FFmpegKit.executeWithArguments(args.toTypedArray())
         if (!ReturnCode.isSuccess(session.returnCode) || !output.exists() || output.length() == 0L) {
             output.delete()
             error(
