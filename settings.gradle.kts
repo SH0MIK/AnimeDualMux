@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "AnimeDualMux"
+rootProject.name = "MKVSubEx"
 include(":app")
