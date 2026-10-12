@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:allowBackup="true"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@drawable/mkv_subex_icon"
         android:label="MKV SubEx"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
