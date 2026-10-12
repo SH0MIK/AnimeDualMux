@@ -1,6 +1,6 @@
-# MKV Subtitle Extractor
+# MKV SubEx
 
-Android app for exporting subtitle tracks from MKV files. The app processes files locally on the device and does not re-encode the video.
+**MKV SubEx** is an Android app for exporting subtitle tracks from MKV files. The app processes files locally on the device and does not re-encode the video.
 
 ## Features
 
@@ -14,7 +14,7 @@ Android app for exporting subtitle tracks from MKV files. The app processes file
 
 ## Build an APK
 
-Every push, pull request, and manual workflow dispatch runs the **Android APK** GitHub Actions workflow. Open the repository's Actions tab, choose a successful run, and download the **MKV-Subtitle-Extractor-debug-apk** artifact. This is an unsigned debug APK for testing.
+Every push, pull request, and manual workflow dispatch runs the **Android APK** GitHub Actions workflow. Open the repository's Actions tab, choose a successful run, and download the **MKV-SubEx-debug-apk** artifact. This is an unsigned debug APK for testing.
 
 ## Notes
 
