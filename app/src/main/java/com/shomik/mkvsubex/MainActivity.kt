@@ -497,6 +497,7 @@ class MainActivity : ComponentActivity() {
             val failures = mutableListOf<String>()
             uris.forEachIndexed { index, uri ->
                 var name = "video_${index + 1}.mkv"
+                var temporaryInput: File? = null
                 try {
                     name = contentResolver.query(
                         uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
@@ -505,23 +506,22 @@ class MainActivity : ComponentActivity() {
                     } ?: name
                     runOnUiThread { onProgress(index, uris.size, name) }
 
-                    // Probe through the selected document descriptor; don't copy the entire video just to scan tracks.
-                    val descriptor = contentResolver.openFileDescriptor(uri, "r")
-                        ?: error("Could not open selected file.")
-                    val probeOutput = try {
-                        FFprobeKit.executeWithArguments(
-                            arrayOf("-v", "error", "-show_streams", "-of", "json", "/proc/self/fd/${descriptor.fd}")
-                        ).let { probe ->
-                            check(ReturnCode.isSuccess(probe.returnCode)) {
-                                "FFprobe could not read $name: ${probe.output.take(160)}"
-                            }
-                            probe.output
-                        }
-                    } finally {
-                        descriptor.close()
+                    // FFmpegKit cannot reliably read Android's SAF descriptor via /proc/self/fd.
+                    // Stage one temporary copy, probe it, then delete it immediately.
+                    temporaryInput = File(cacheDir, "subtitle_scan_${System.currentTimeMillis()}_${index}.mkv")
+                    contentResolver.openInputStream(uri).use { input ->
+                        requireNotNull(input) { "Could not read selected file." }
+                        temporaryInput.outputStream().buffered().use { output -> input.copyTo(output) }
                     }
 
-                    val streams = JSONObject(probeOutput).optJSONArray("streams")
+                    val probe = FFprobeKit.executeWithArguments(
+                        arrayOf("-v", "error", "-show_streams", "-of", "json", temporaryInput.absolutePath)
+                    )
+                    check(ReturnCode.isSuccess(probe.returnCode)) {
+                        "FFprobe could not read $name: ${probe.output.take(160)}"
+                    }
+
+                    val streams = JSONObject(probe.output).optJSONArray("streams")
                     val tracks = mutableListOf<SubtitleTrack>()
                     if (streams != null) {
                         for (i in 0 until streams.length()) {
@@ -539,6 +539,8 @@ class MainActivity : ComponentActivity() {
                     scanned += ScannedVideo(uri, name, tracks)
                 } catch (e: Exception) {
                     failures += "$name: ${e.message ?: "Could not scan file"}"
+                } finally {
+                    temporaryInput?.delete()
                 }
                 runOnUiThread { onProgress(index + 1, uris.size, name) }
             }
