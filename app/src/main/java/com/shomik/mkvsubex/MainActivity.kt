@@ -59,7 +59,8 @@ private data class SubtitleTrack(
     val streamIndex: Int,
     val codec: String,
     val language: String,
-    val title: String
+    val title: String,
+    val codecPrivate: String = ""
 ) {
     val extension: String
         get() = when (codec.lowercase(Locale.ROOT)) {
@@ -152,7 +153,7 @@ class MainActivity : ComponentActivity() {
                 progress = 0.1f
                 worker.execute {
                     try {
-                        val output = extract(pair.first, pair.second, convertAssToVtt)
+                        val output = extractMultiple(pair.first, listOf(pair.second), convertAssToVtt).getValue(pair.second)
                         contentResolver.openOutputStream(uri).use { stream ->
                             requireNotNull(stream) { "Could not open destination." }
                             FileInputStream(output).use { it.copyTo(stream) }
@@ -191,7 +192,6 @@ class MainActivity : ComponentActivity() {
                     isError = false
                     progress = 0f
                     worker.execute {
-                        val inputFiles = linkedMapOf<String, File>()
                         var zipFile: File? = null
                         try {
                             zipFile = File(cacheDir, "subtitle_export_${System.currentTimeMillis()}.zip")
@@ -204,9 +204,7 @@ class MainActivity : ComponentActivity() {
                                         progress = completed.toFloat() / chosen.size
                                         status = "Extracting ${group.size} track(s): ${video.name}"
                                     }
-                                    val inputKey = video.uri.toString()
-                                    val inputFile = inputFiles.getOrPut(inputKey) { materializeForExport(video) }
-                                    val outputs = extractMultiple(video, group.map { it.second }, convertAssToVtt, inputFile)
+                                    val outputs = extractMultiple(video, group.map { it.second }, convertAssToVtt)
                                     try {
                                         group.forEach { pair ->
                                             val output = outputs.getValue(pair.second)
@@ -247,7 +245,6 @@ class MainActivity : ComponentActivity() {
                                 busy = false
                             }
                         } finally {
-                            inputFiles.values.forEach { it.delete() }
                             zipFile?.delete()
                         }
                     }
@@ -609,6 +606,7 @@ class MainActivity : ComponentActivity() {
                 var codec = "unknown"
                 var language = "und"
                 var title = ""
+                var codecPrivate = ""
                 while (childPosition < entryEnd) {
                     channel.position(childPosition)
                     val child = readEbmlElement(channel, entryEnd) ?: break
@@ -618,6 +616,7 @@ class MainActivity : ComponentActivity() {
                         0x83L -> trackType = readEbmlUnsigned(channel, child)
                         0x86L -> codec = readEbmlString(channel, child)
                         0x536EL -> title = readEbmlString(channel, child)
+                        0x63A2L -> codecPrivate = readEbmlString(channel, child, maxBytes = 1_000_000)
                         0x22B59CL, 0x22B59DL -> language = readEbmlString(channel, child)
                     }
                     if (child.end <= childPosition) break
@@ -637,7 +636,8 @@ class MainActivity : ComponentActivity() {
                             else -> codec.removePrefix("S_TEXT/").lowercase(Locale.ROOT)
                         },
                         language = language,
-                        title = title
+                        title = title,
+                        codecPrivate = codecPrivate
                     )
                 }
             }
@@ -708,9 +708,10 @@ class MainActivity : ComponentActivity() {
 
     private fun readEbmlString(
         channel: java.nio.channels.FileChannel,
-        element: EbmlElement
+        element: EbmlElement,
+        maxBytes: Int = 4096
     ): String {
-        if (element.size <= 0 || element.size > 4096) return ""
+        if (element.size <= 0 || element.size > maxBytes) return ""
         channel.position(element.dataStart)
         val buffer = java.nio.ByteBuffer.allocate(element.size.toInt())
         while (buffer.hasRemaining()) {
@@ -811,16 +812,324 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun extractMultiple(
+    // ---------------------------------------------------------------------
+    // Export
+    //
+    // Text tracks (ASS/SSA/SRT) are pulled straight out of the MKV by walking
+    // Cluster -> Block headers and seeking past every video/audio payload.
+    // No cache copy of the video, no FFmpeg process. PGS/VobSub/WebVTT still go
+    // through FFmpeg, but read the file through its descriptor (no copy) when
+    // possible.
+    // ---------------------------------------------------------------------
+
+    private class RawCue(val startMs: Long, val durationMs: Long, val data: ByteArray)
+
+    /** Small buffered positional reader so header parsing isn't a syscall per byte. */
+    private class MkvBlockReader(private val channel: java.nio.channels.FileChannel) {
+        private val buffer = ByteArray(8192)
+        private var bufferStart = -1L
+        private var bufferLength = 0
+        val size: Long = channel.size()
+
+        fun u8(position: Long): Int {
+            if (position < 0 || position >= size) return -1
+            if (position < bufferStart || position >= bufferStart + bufferLength) {
+                val target = java.nio.ByteBuffer.wrap(buffer)
+                var read = 0
+                while (target.hasRemaining()) {
+                    val count = channel.read(target, position + read)
+                    if (count <= 0) break
+                    read += count
+                }
+                bufferStart = position
+                bufferLength = read
+                if (read == 0) return -1
+            }
+            return buffer[(position - bufferStart).toInt()].toInt() and 0xFF
+        }
+
+        fun bytes(position: Long, length: Int): ByteArray {
+            val out = ByteArray(length)
+            val target = java.nio.ByteBuffer.wrap(out)
+            var read = 0
+            while (target.hasRemaining()) {
+                val count = channel.read(target, position + read)
+                if (count <= 0) error("Unexpected end of file.")
+                read += count
+            }
+            return out
+        }
+
+        fun unsigned(position: Long, length: Long): Long {
+            var value = 0L
+            for (i in 0 until length.coerceIn(0L, 8L).toInt()) {
+                value = (value shl 8) or u8(position + i).coerceAtLeast(0).toLong()
+            }
+            return value
+        }
+    }
+
+    private fun readHeader(reader: MkvBlockReader, position: Long, limit: Long): EbmlElement? {
+        if (position >= limit) return null
+        val first = reader.u8(position)
+        if (first <= 0) return null
+        val idLength = Integer.numberOfLeadingZeros(first) - 24 + 1
+        if (idLength > 4) return null
+        var id = first.toLong()
+        for (i in 1 until idLength) {
+            val b = reader.u8(position + i)
+            if (b < 0) return null
+            id = (id shl 8) or b.toLong()
+        }
+        val sizePosition = position + idLength
+        val sizeFirst = reader.u8(sizePosition)
+        if (sizeFirst <= 0) return null
+        val sizeLength = Integer.numberOfLeadingZeros(sizeFirst) - 24 + 1
+        var size = (sizeFirst and (0xFF ushr sizeLength)).toLong()
+        for (i in 1 until sizeLength) {
+            val b = reader.u8(sizePosition + i)
+            if (b < 0) return null
+            size = (size shl 8) or b.toLong()
+        }
+        if (size == (1L shl (7 * sizeLength)) - 1) size = -1
+        val dataStart = sizePosition + sizeLength
+        // Be lenient with truncated files: clamp instead of failing.
+        if (size >= 0 && dataStart + size > limit) size = limit - dataStart
+        return EbmlElement(id, size, dataStart)
+    }
+
+    private fun assClock(ms: Long): String {
+        val cs = (ms + 5) / 10
+        return String.format(
+            Locale.ROOT, "%d:%02d:%02d.%02d",
+            cs / 360000, (cs / 6000) % 60, (cs / 100) % 60, cs % 100
+        )
+    }
+
+    private fun srtClock(ms: Long): String =
+        String.format(
+            Locale.ROOT, "%02d:%02d:%02d,%03d",
+            ms / 3600000, (ms / 60000) % 60, (ms / 1000) % 60, ms % 1000
+        )
+
+    private fun writeSrtFile(file: File, cues: List<RawCue>) {
+        file.bufferedWriter(Charsets.UTF_8).use { w ->
+            cues.forEachIndexed { i, cue ->
+                val end = cue.startMs + if (cue.durationMs > 0) cue.durationMs else 2000
+                w.write("${i + 1}\n${srtClock(cue.startMs)} --> ${srtClock(end)}\n")
+                w.write(String(cue.data, Charsets.UTF_8).trim())
+                w.write("\n\n")
+            }
+        }
+    }
+
+    private fun writeAssFile(file: File, track: SubtitleTrack, cues: List<RawCue>) {
+        val isSsa = track.codec.equals("ssa", ignoreCase = true)
+        var header = track.codecPrivate.removePrefix("\uFEFF").replace("\r\n", "\n").trimEnd()
+        val eventsAt = header.lastIndexOf("[Events]", ignoreCase = true)
+        if (eventsAt < 0) header += "\n\n[Events]"
+        if (eventsAt < 0 || !header.substring(eventsAt).contains("Format:", ignoreCase = true)) {
+            header += "\nFormat: " + (if (isSsa) "Marked" else "Layer") +
+                ", Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+        }
+        file.bufferedWriter(Charsets.UTF_8).use { w ->
+            w.write(header)
+            w.write("\n")
+            cues.forEach { cue ->
+                // Matroska ASS block: ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+                val parts = String(cue.data, Charsets.UTF_8).split(",", limit = 9)
+                if (parts.size < 9) return@forEach
+                val end = cue.startMs + if (cue.durationMs > 0) cue.durationMs else 2000
+                w.write(
+                    "Dialogue: ${parts[1]},${assClock(cue.startMs)},${assClock(end)}," +
+                        "${parts[2]},${parts[3]},${parts[4]},${parts[5]},${parts[6]},${parts[7]}," +
+                        parts[8].trimEnd('\r', '\n') + "\n"
+                )
+            }
+        }
+    }
+
+    /** One pass over the MKV, collecting blocks for every requested text track at once. */
+    private fun extractTextTracksNative(
         video: ScannedVideo,
         tracks: List<SubtitleTrack>,
-        convertAssToVtt: Boolean,
-        inputFile: File
+        convertAssToVtt: Boolean
     ): Map<SubtitleTrack, File> {
-        require(tracks.isNotEmpty()) { "No subtitle tracks selected." }
+        val wanted = tracks.associateBy { it.index.toLong() }
+        val cues = tracks.associateWith { mutableListOf<RawCue>() }
+        val level1Ids = setOf(
+            0x1F43B675L, 0x1C53BB6BL, 0x1254C367L, 0x1043A770L,
+            0x1941A469L, 0x114D9B74L, 0x1549A966L, 0x1654AE6BL
+        )
+
+        contentResolver.openFileDescriptor(video.uri, "r").use { descriptor ->
+            requireNotNull(descriptor) { "Could not open selected file." }
+            FileInputStream(descriptor.fileDescriptor).use { input ->
+                val reader = MkvBlockReader(input.channel)
+                val fileSize = reader.size
+
+                var position = 0L
+                var segment: EbmlElement? = null
+                while (position < fileSize) {
+                    val e = readHeader(reader, position, fileSize) ?: break
+                    if (e.id == 0x18538067L) { segment = e; break }
+                    if (e.size < 0) break
+                    position = e.end
+                }
+                val seg = segment ?: error("This file does not contain a Matroska Segment.")
+                val segEnd = if (seg.size < 0) fileSize else minOf(seg.end, fileSize)
+                var timecodeScale = 1_000_000L
+
+                fun processCluster(cluster: EbmlElement): Long {
+                    val clusterEnd = if (cluster.size < 0) segEnd else cluster.end
+                    var clusterTs = 0L
+
+                    fun handleBlock(start: Long, size: Long, durationTicks: Long) {
+                        val first = reader.u8(start)
+                        if (first <= 0) return
+                        val trackLen = Integer.numberOfLeadingZeros(first) - 24 + 1
+                        var trackNo = (first and (0xFF ushr trackLen)).toLong()
+                        for (i in 1 until trackLen) {
+                            trackNo = (trackNo shl 8) or reader.u8(start + i).coerceAtLeast(0).toLong()
+                        }
+                        val track = wanted[trackNo] ?: return   // not ours: payload is skipped untouched
+                        val headerLen = trackLen + 3
+                        val rel = ((reader.u8(start + trackLen).coerceAtLeast(0) shl 8) or
+                            reader.u8(start + trackLen + 1).coerceAtLeast(0)).toShort().toLong()
+                        val flags = reader.u8(start + trackLen + 2)
+                        if (((flags shr 1) and 3) != 0) {
+                            throw UnsupportedOperationException("Laced subtitle block")
+                        }
+                        val payloadSize = size - headerLen
+                        if (payloadSize <= 0 || payloadSize > 4_000_000) return
+                        val data = reader.bytes(start + headerLen, payloadSize.toInt())
+                        cues.getValue(track) += RawCue(
+                            startMs = (clusterTs + rel) * timecodeScale / 1_000_000L,
+                            durationMs = durationTicks * timecodeScale / 1_000_000L,
+                            data = data
+                        )
+                    }
+
+                    var p = cluster.dataStart
+                    while (p < clusterEnd) {
+                        val c = readHeader(reader, p, clusterEnd) ?: return clusterEnd
+                        if (cluster.size < 0 && c.id in level1Ids) return p
+                        if (c.size < 0) return clusterEnd
+                        when (c.id) {
+                            0xE7L -> clusterTs = reader.unsigned(c.dataStart, c.size)
+                            0xA3L -> handleBlock(c.dataStart, c.size, 0L)
+                            0xA0L -> {
+                                var blockStart = -1L
+                                var blockSize = 0L
+                                var duration = 0L
+                                var q = c.dataStart
+                                while (q < c.end) {
+                                    val g = readHeader(reader, q, c.end) ?: break
+                                    if (g.size < 0) break
+                                    if (g.id == 0xA1L) { blockStart = g.dataStart; blockSize = g.size }
+                                    else if (g.id == 0x9BL) duration = reader.unsigned(g.dataStart, g.size)
+                                    q = g.end
+                                }
+                                if (blockStart >= 0) handleBlock(blockStart, blockSize, duration)
+                            }
+                        }
+                        p = c.end
+                    }
+                    return clusterEnd
+                }
+
+                position = seg.dataStart
+                while (position < segEnd) {
+                    val e = readHeader(reader, position, segEnd) ?: break
+                    if (e.id == 0x1F43B675L) {
+                        val next = processCluster(e)
+                        if (next <= position) break
+                        position = next
+                        continue
+                    }
+                    if (e.size < 0) break
+                    if (e.id == 0x1549A966L) {
+                        var p = e.dataStart
+                        while (p < e.end) {
+                            val c = readHeader(reader, p, e.end) ?: break
+                            if (c.size < 0) break
+                            if (c.id == 0x2AD7B1L) {
+                                val v = reader.unsigned(c.dataStart, c.size)
+                                if (v > 0) timecodeScale = v
+                            }
+                            p = c.end
+                        }
+                    }
+                    position = e.end
+                }
+            }
+        }
+
+        val created = mutableListOf<File>()
+        val outputs = linkedMapOf<SubtitleTrack, File>()
+        try {
+            tracks.forEach { track ->
+                val trackCues = cues.getValue(track)
+                check(trackCues.isNotEmpty()) {
+                    "Track #${track.index} (${track.codec}) produced an empty file."
+                }
+                val codec = track.codec.lowercase(Locale.ROOT)
+                val converting = convertAssToVtt && codec in setOf("ass", "ssa")
+                val stamp = "${track.index}_${System.nanoTime()}"
+                val source = File(
+                    cacheDir,
+                    "subtitle_native_$stamp." + if (codec == "subrip") "srt" else codec
+                )
+                created += source
+                if (codec == "subrip") writeSrtFile(source, trackCues)
+                else writeAssFile(source, track, trackCues)
+
+                if (converting) {
+                    val output = File(cacheDir, "subtitle_native_out_$stamp.vtt")
+                    created += output
+                    convertAssToPlainVtt(source, output)
+                    source.delete()
+                    outputs[track] = output
+                } else {
+                    outputs[track] = source
+                }
+            }
+            return outputs
+        } catch (e: Exception) {
+            created.forEach { it.delete() }
+            throw e
+        }
+    }
+
+    /** Prefer reading the picked file through its descriptor; only copy to cache as a last resort. */
+    private fun <T> withFfmpegInput(video: ScannedVideo, block: (String) -> T): T {
+        try {
+            contentResolver.openFileDescriptor(video.uri, "r").use { descriptor ->
+                if (descriptor != null) {
+                    val path = "/proc/self/fd/${descriptor.fd}"
+                    if (File(path).canRead()) return block(path)
+                }
+            }
+        } catch (_: Exception) {
+            // fall through to the copy path
+        }
+        val local = materializeForExport(video)
+        try {
+            return block(local.absolutePath)
+        } finally {
+            local.delete()
+        }
+    }
+
+    /** FFmpeg path, used for PGS / VobSub / WebVTT or if the native reader hits something odd. */
+    private fun extractWithFfmpeg(
+        video: ScannedVideo,
+        tracks: List<SubtitleTrack>,
+        convertAssToVtt: Boolean
+    ): Map<SubtitleTrack, File> {
         val intermediates = linkedMapOf<SubtitleTrack, File>()
         val outputs = linkedMapOf<SubtitleTrack, File>()
-        val args = mutableListOf("-y", "-v", "error", "-i", inputFile.absolutePath)
+        val mapArgs = mutableListOf<String>()
 
         tracks.forEach { track ->
             val converting = convertAssToVtt && track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")
@@ -830,13 +1139,17 @@ class MainActivity : ComponentActivity() {
             val output = if (converting) File(cacheDir, "subtitle_batch_output_$stamp.vtt") else intermediate
             intermediates[track] = intermediate
             outputs[track] = output
-            args.addAll(listOf("-map", "0:s:${track.streamIndex}", "-c:s", "copy", intermediate.absolutePath))
+            mapArgs.addAll(listOf("-map", "0:s:${track.streamIndex}", "-c:s", "copy", intermediate.absolutePath))
         }
 
         try {
-            val session = FFmpegKit.executeWithArguments(args.toTypedArray())
+            val session = withFfmpegInput(video) { path ->
+                FFmpegKit.executeWithArguments(
+                    (listOf("-y", "-v", "error", "-i", path) + mapArgs).toTypedArray()
+                )
+            }
             if (!ReturnCode.isSuccess(session.returnCode)) {
-                error("Bulk extraction failed: " + (session.failStackTrace ?: session.output.take(300)))
+                error("Extraction failed: " + (session.failStackTrace ?: session.output.take(300)))
             }
             tracks.forEach { track ->
                 val intermediate = intermediates.getValue(track)
@@ -852,9 +1165,39 @@ class MainActivity : ComponentActivity() {
             return outputs
         } catch (e: Exception) {
             intermediates.values.forEach { it.delete() }
-            outputs.values.filter { output -> output !in intermediates.values }.forEach { it.delete() }
+            outputs.values.forEach { it.delete() }
             throw e
         }
+    }
+
+    private fun extractMultiple(
+        video: ScannedVideo,
+        tracks: List<SubtitleTrack>,
+        convertAssToVtt: Boolean
+    ): Map<SubtitleTrack, File> {
+        require(tracks.isNotEmpty()) { "No subtitle tracks selected." }
+        val nativeCodecs = setOf("ass", "ssa", "subrip")
+        val results = linkedMapOf<SubtitleTrack, File>()
+        var remaining = tracks
+
+        val textTracks = tracks.filter { it.codec.lowercase(Locale.ROOT) in nativeCodecs }
+        if (textTracks.isNotEmpty()) {
+            try {
+                results += extractTextTracksNative(video, textTracks, convertAssToVtt)
+                remaining = tracks.filterNot { it in textTracks }
+            } catch (_: Exception) {
+                // Unusual file (laced blocks, damaged clusters...): let FFmpeg handle everything.
+            }
+        }
+        if (remaining.isNotEmpty()) {
+            try {
+                results += extractWithFfmpeg(video, remaining, convertAssToVtt)
+            } catch (e: Exception) {
+                results.values.forEach { it.delete() }
+                throw e
+            }
+        }
+        return tracks.associateWith { results.getValue(it) }
     }
 
     private fun materializeForExport(video: ScannedVideo): File {
@@ -864,61 +1207,5 @@ class MainActivity : ComponentActivity() {
             local.outputStream().buffered().use { output -> input.copyTo(output) }
         }
         return local
-    }
-
-    private fun extract(
-        video: ScannedVideo,
-        track: SubtitleTrack,
-        convertAssToVtt: Boolean,
-        sourceFile: File? = null
-    ): File {
-        val converting = convertAssToVtt &&
-            track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")
-        val extension = exportExtension(track, convertAssToVtt)
-        val output = File(
-            cacheDir,
-            "subtitle_track_${track.index}_${System.currentTimeMillis()}.$extension"
-        )
-        val intermediate = if (converting) {
-            File(cacheDir, "subtitle_source_${track.index}_${System.currentTimeMillis()}.ass")
-        } else {
-            output
-        }
-        val inputFile = sourceFile ?: materializeForExport(video)
-        val ownsInputFile = sourceFile == null
-        val args = arrayOf(
-            "-y", "-v", "error", "-i", inputFile.absolutePath,
-            "-map", "0:s:${track.streamIndex}", "-c:s", "copy", intermediate.absolutePath
-        )
-        val session = try {
-            FFmpegKit.executeWithArguments(args)
-        } finally {
-            if (ownsInputFile) inputFile.delete()
-        }
-        if (!ReturnCode.isSuccess(session.returnCode) ||
-            !intermediate.exists() || intermediate.length() == 0L
-        ) {
-            output.delete()
-            intermediate.delete()
-            error(
-                "Track #${track.index} (${track.codec}) failed: " +
-                    (session.failStackTrace ?: session.output.take(200))
-            )
-        }
-        if (converting) {
-            try {
-                convertAssToPlainVtt(intermediate, output)
-            } finally {
-                intermediate.delete()
-            }
-        }
-        if (!ReturnCode.isSuccess(session.returnCode) || !output.exists() || output.length() == 0L) {
-            output.delete()
-            error(
-                "Track #${track.index} (${track.codec}) failed: " +
-                    (session.failStackTrace ?: session.output.take(200))
-            )
-        }
-        return output
     }
 }
