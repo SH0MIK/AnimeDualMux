@@ -12,8 +12,8 @@ android {
         applicationId = "com.shomik.animedualmux"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "1.0.0"
     }
 
     buildFeatures { compose = true }
@@ -33,7 +33,6 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full-gpl:8.1.9")
     debugImplementation("androidx.compose.ui:ui-tooling")

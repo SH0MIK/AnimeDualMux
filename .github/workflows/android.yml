@@ -2,7 +2,7 @@ name: Android APK
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, feature/subtitle-extractor]
   pull_request:
   workflow_dispatch:
 
@@ -34,7 +34,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AnimeDualMux-debug-apk
+          name: MKV-SubEx-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
