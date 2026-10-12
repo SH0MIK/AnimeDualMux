@@ -196,34 +196,38 @@ class MainActivity : ComponentActivity() {
                         try {
                             zipFile = File(cacheDir, "subtitle_export_${System.currentTimeMillis()}.zip")
                             ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
-                                chosen.forEachIndexed { index, pair ->
+                                var completed = 0
+                                val groups = chosen.groupBy { it.first.uri.toString() }
+                                groups.values.forEach { group ->
+                                    val video = group.first().first
                                     runOnUiThread {
-                                        progress = index.toFloat() / chosen.size
-                                        status = "Extracting ${index + 1} of ${chosen.size}: ${pair.first.name}"
+                                        progress = completed.toFloat() / chosen.size
+                                        status = "Extracting ${group.size} track(s): ${video.name}"
                                     }
-                                    // Materialize each source MKV once, then reuse it for every
-                                    // selected subtitle track from that file.
-                                    val inputKey = pair.first.uri.toString()
-                                    val inputFile = inputFiles.getOrPut(inputKey) {
-                                        materializeForExport(pair.first)
-                                    }
-                                    val output = extract(pair.first, pair.second, convertAssToVtt, inputFile)
+                                    val inputKey = video.uri.toString()
+                                    val inputFile = inputFiles.getOrPut(inputKey) { materializeForExport(video) }
+                                    val outputs = extractMultiple(video, group.map { it.second }, convertAssToVtt, inputFile)
                                     try {
-                                        val base = pair.first.name.substringBeforeLast('.', pair.first.name)
-                                            .replace(Regex("[^A-Za-z0-9._ -]"), "_")
-                                        val title = pair.second.title.takeIf { it.isNotBlank() }
-                                            ?.replace(Regex("[^A-Za-z0-9._ -]"), "_")
-                                        val entry = buildString {
-                                            append(base).append("/")
-                                            append("track_").append(pair.second.index).append("_")
-                                            if (title != null) append(title).append("_")
-                                            append(pair.second.language).append(".").append(exportExtension(pair.second, convertAssToVtt))
+                                        group.forEach { pair ->
+                                            val output = outputs.getValue(pair.second)
+                                            val base = pair.first.name.substringBeforeLast('.', pair.first.name)
+                                                .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                            val title = pair.second.title.takeIf { it.isNotBlank() }
+                                                ?.replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                            val entry = buildString {
+                                                append(base).append("/")
+                                                append("track_").append(pair.second.index).append("_")
+                                                if (title != null) append(title).append("_")
+                                                append(pair.second.language).append(".").append(exportExtension(pair.second, convertAssToVtt))
+                                            }
+                                            zip.putNextEntry(ZipEntry(entry))
+                                            FileInputStream(output).use { it.copyTo(zip) }
+                                            zip.closeEntry()
+                                            completed++
+                                            runOnUiThread { progress = completed.toFloat() / chosen.size }
                                         }
-                                        zip.putNextEntry(ZipEntry(entry))
-                                        FileInputStream(output).use { it.copyTo(zip) }
-                                        zip.closeEntry()
                                     } finally {
-                                        output.delete()
+                                        outputs.values.forEach { it.delete() }
                                     }
                                 }
                             }
@@ -805,6 +809,52 @@ class MainActivity : ComponentActivity() {
         return "%02d:%02d:%02d.%03d".format(
             Locale.ROOT, hours, minutes, seconds, centiseconds * 10
         )
+    }
+
+    private fun extractMultiple(
+        video: ScannedVideo,
+        tracks: List<SubtitleTrack>,
+        convertAssToVtt: Boolean,
+        inputFile: File
+    ): Map<SubtitleTrack, File> {
+        require(tracks.isNotEmpty()) { "No subtitle tracks selected." }
+        val intermediates = linkedMapOf<SubtitleTrack, File>()
+        val outputs = linkedMapOf<SubtitleTrack, File>()
+        val args = mutableListOf("-y", "-v", "error", "-i", inputFile.absolutePath)
+
+        tracks.forEach { track ->
+            val converting = convertAssToVtt && track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")
+            val extension = if (converting) track.codec.lowercase(Locale.ROOT) else exportExtension(track, convertAssToVtt)
+            val stamp = "${track.index}_${System.nanoTime()}"
+            val intermediate = File(cacheDir, "subtitle_batch_source_$stamp.$extension")
+            val output = if (converting) File(cacheDir, "subtitle_batch_output_$stamp.vtt") else intermediate
+            intermediates[track] = intermediate
+            outputs[track] = output
+            args.addAll(listOf("-map", "0:s:${track.streamIndex}", "-c:s", "copy", intermediate.absolutePath))
+        }
+
+        try {
+            val session = FFmpegKit.executeWithArguments(args.toTypedArray())
+            if (!ReturnCode.isSuccess(session.returnCode)) {
+                error("Bulk extraction failed: " + (session.failStackTrace ?: session.output.take(300)))
+            }
+            tracks.forEach { track ->
+                val intermediate = intermediates.getValue(track)
+                val output = outputs.getValue(track)
+                check(intermediate.exists() && intermediate.length() > 0L) {
+                    "Track #${track.index} (${track.codec}) produced an empty file."
+                }
+                if (output != intermediate) {
+                    convertAssToPlainVtt(intermediate, output)
+                    intermediate.delete()
+                }
+            }
+            return outputs
+        } catch (e: Exception) {
+            intermediates.values.forEach { it.delete() }
+            outputs.values.filter { output -> output !in intermediates.values }.forEach { it.delete() }
+            throw e
+        }
     }
 
     private fun materializeForExport(video: ScannedVideo): File {
