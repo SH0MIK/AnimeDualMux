@@ -2,6 +2,7 @@ package com.shomik.mkvsubex
 
 import android.net.Uri
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
@@ -491,13 +492,11 @@ class MainActivity : ComponentActivity() {
         onProgress: (Int, Int, String) -> Unit,
         done: (List<ScannedVideo>, String) -> Unit
     ) {
-        done(emptyList(), "Preparing to scan ${uris.size} file(s)…")
         worker.execute {
             val scanned = mutableListOf<ScannedVideo>()
             val failures = mutableListOf<String>()
             uris.forEachIndexed { index, uri ->
                 var name = "video_${index + 1}.mkv"
-                var temporaryInput: File? = null
                 try {
                     name = contentResolver.query(
                         uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
@@ -506,41 +505,17 @@ class MainActivity : ComponentActivity() {
                     } ?: name
                     runOnUiThread { onProgress(index, uris.size, name) }
 
-                    // FFmpegKit cannot reliably read Android's SAF descriptor via /proc/self/fd.
-                    // Stage one temporary copy, probe it, then delete it immediately.
-                    temporaryInput = File(cacheDir, "subtitle_scan_${System.currentTimeMillis()}_${index}.mkv")
-                    contentResolver.openInputStream(uri).use { input ->
-                        requireNotNull(input) { "Could not read selected file." }
-                        temporaryInput.outputStream().buffered().use { output -> input.copyTo(output) }
-                    }
-
-                    val probe = FFprobeKit.executeWithArguments(
-                        arrayOf("-v", "error", "-show_streams", "-of", "json", temporaryInput.absolutePath)
-                    )
-                    check(ReturnCode.isSuccess(probe.returnCode)) {
-                        "FFprobe could not read $name: ${probe.output.take(160)}"
-                    }
-
-                    val streams = JSONObject(probe.output).optJSONArray("streams")
-                    val tracks = mutableListOf<SubtitleTrack>()
-                    if (streams != null) {
-                        for (i in 0 until streams.length()) {
-                            val stream = streams.getJSONObject(i)
-                            if (stream.optString("codec_type") != "subtitle") continue
-                            val tags = stream.optJSONObject("tags") ?: JSONObject()
-                            tracks += SubtitleTrack(
-                                index = stream.optInt("index", i),
-                                codec = stream.optString("codec_name", "unknown"),
-                                language = tags.optString("language", "und"),
-                                title = tags.optString("title", "")
-                            )
+                    // Read only EBML element headers and the Tracks element directly from
+                    // the provider's seekable descriptor. No video-sized cache copy is made.
+                    val tracks = contentResolver.openFileDescriptor(uri, "r").use { descriptor ->
+                        requireNotNull(descriptor) { "Could not open selected file." }
+                        FileInputStream(descriptor.fileDescriptor).use { input ->
+                            readMatroskaSubtitleTracks(input.channel)
                         }
                     }
                     scanned += ScannedVideo(uri, name, tracks)
                 } catch (e: Exception) {
                     failures += "$name: ${e.message ?: "Could not scan file"}"
-                } finally {
-                    temporaryInput?.delete()
                 }
                 runOnUiThread { onProgress(index + 1, uris.size, name) }
             }
@@ -552,11 +527,176 @@ class MainActivity : ComponentActivity() {
                 }
                 done(
                     scanned,
-                    if (failures.isEmpty()) "Scan complete. Review tracks, then export."
+                    if (failures.isEmpty()) "Scan complete. Read MKV track metadata without copying video files."
                     else "Scanned ${scanned.size} file(s); ${failures.size} failed: ${failures.take(2).joinToString()}"
                 )
             }
         }
+    }
+
+    private data class EbmlElement(val id: Long, val size: Long, val dataStart: Long) {
+        val end: Long get() = if (size < 0) -1 else dataStart + size
+    }
+
+    /**
+     * Minimal seekable EBML reader for Matroska track metadata.
+     * It skips payloads by seeking over element sizes, never reading video clusters.
+     */
+    private fun readMatroskaSubtitleTracks(channel: java.nio.channels.FileChannel): List<SubtitleTrack> {
+        val fileSize = channel.size()
+        channel.position(0)
+        var segment: EbmlElement? = null
+        while (channel.position() < fileSize) {
+            val element = readEbmlElement(channel, fileSize) ?: break
+            if (element.id == 0x18538067L) {
+                segment = element
+                break
+            }
+            if (element.end < 0) break
+            channel.position(element.end)
+        }
+        val segmentElement = segment ?: error("This file does not contain a Matroska Segment.")
+        val segmentEnd = if (segmentElement.size < 0) fileSize else minOf(segmentElement.end, fileSize)
+        var position = segmentElement.dataStart
+        var tracksElement: EbmlElement? = null
+
+        while (position < segmentEnd) {
+            channel.position(position)
+            val element = readEbmlElement(channel, segmentEnd) ?: break
+            if (element.id == 0x1654AE6BL) {
+                tracksElement = element
+                break
+            }
+            if (element.size < 0) {
+                // An unknown-sized top-level element cannot safely be skipped.
+                break
+            }
+            if (element.end <= position) break
+            position = element.end
+        }
+
+        val tracks = tracksElement ?: error("Could not locate the MKV Tracks metadata.")
+        val tracksEnd = minOf(tracks.end, segmentEnd)
+        val result = mutableListOf<SubtitleTrack>()
+        position = tracks.dataStart
+        while (position < tracksEnd) {
+            channel.position(position)
+            val element = readEbmlElement(channel, tracksEnd) ?: break
+            if (element.id == 0xAEL) {
+                val entryEnd = if (element.size < 0) tracksEnd else minOf(element.end, tracksEnd)
+                var childPosition = element.dataStart
+                var trackNumber = 0
+                var trackType = 0
+                var codec = "unknown"
+                var language = "und"
+                var title = ""
+                while (childPosition < entryEnd) {
+                    channel.position(childPosition)
+                    val child = readEbmlElement(channel, entryEnd) ?: break
+                    if (child.size < 0) break
+                    when (child.id) {
+                        0xD7L -> trackNumber = readEbmlUnsigned(channel, child)
+                        0x83L -> trackType = readEbmlUnsigned(channel, child)
+                        0x86L -> codec = readEbmlString(channel, child)
+                        0x536EL -> title = readEbmlString(channel, child)
+                        0x22B59CL, 0x22B59DL -> language = readEbmlString(channel, child)
+                    }
+                    if (child.end <= childPosition) break
+                    childPosition = child.end
+                }
+                if (trackType == 0x11) {
+                    result += SubtitleTrack(
+                        index = trackNumber,
+                        codec = when (codec) {
+                            "S_TEXT/ASS" -> "ass"
+                            "S_TEXT/SSA" -> "ssa"
+                            "S_TEXT/UTF8" -> "subrip"
+                            "S_TEXT/WEBVTT" -> "webvtt"
+                            "S_HDMV/PGS" -> "hdmv_pgs_subtitle"
+                            "S_VOBSUB" -> "dvd_subtitle"
+                            else -> codec.removePrefix("S_TEXT/").lowercase(Locale.ROOT)
+                        },
+                        language = language,
+                        title = title
+                    )
+                }
+            }
+            if (element.size < 0 || element.end <= position) break
+            position = element.end
+        }
+        return result
+    }
+
+    private fun readEbmlElement(
+        channel: java.nio.channels.FileChannel,
+        limit: Long
+    ): EbmlElement? {
+        val start = channel.position()
+        if (start >= limit) return null
+        val idFirst = readOneByte(channel) ?: return null
+        val idLength = ebmlVintLength(idFirst)
+        var id = idFirst.toLong()
+        repeat(idLength - 1) {
+            val next = readOneByte(channel) ?: error("Unexpected end of EBML element ID.")
+            id = (id shl 8) or next.toLong()
+        }
+        val sizeFirst = readOneByte(channel) ?: error("Missing EBML element size.")
+        val sizeLength = ebmlVintLength(sizeFirst)
+        var size = (sizeFirst and (0xFF ushr sizeLength)).toLong()
+        repeat(sizeLength - 1) {
+            val next = readOneByte(channel) ?: error("Unexpected end of EBML element size.")
+            size = (size shl 8) or next.toLong()
+        }
+        val unknownMarker = (1L shl (7 * sizeLength)) - 1
+        if (size == unknownMarker) size = -1
+        val dataStart = channel.position()
+        if (dataStart > limit || (size >= 0 && size > limit - dataStart)) {
+            error("Invalid or truncated EBML element.")
+        }
+        return EbmlElement(id, size, dataStart)
+    }
+
+    private fun ebmlVintLength(firstByte: Int): Int {
+        if (firstByte == 0) error("Invalid EBML variable-length integer.")
+        for (length in 1..8) {
+            if ((firstByte and (0x80 ushr (length - 1))) != 0) return length
+        }
+        error("Invalid EBML variable-length integer.")
+    }
+
+    private fun readOneByte(channel: java.nio.channels.FileChannel): Int? {
+        val buffer = java.nio.ByteBuffer.allocate(1)
+        while (buffer.hasRemaining()) {
+            val count = channel.read(buffer)
+            if (count < 0) return null
+        }
+        return buffer.array()[0].toInt() and 0xFF
+    }
+
+    private fun readEbmlUnsigned(
+        channel: java.nio.channels.FileChannel,
+        element: EbmlElement
+    ): Int {
+        if (element.size !in 1..4) return 0
+        channel.position(element.dataStart)
+        var value = 0
+        repeat(element.size.toInt()) {
+            value = (value shl 8) or (readOneByte(channel) ?: 0)
+        }
+        return value
+    }
+
+    private fun readEbmlString(
+        channel: java.nio.channels.FileChannel,
+        element: EbmlElement
+    ): String {
+        if (element.size <= 0 || element.size > 4096) return ""
+        channel.position(element.dataStart)
+        val buffer = java.nio.ByteBuffer.allocate(element.size.toInt())
+        while (buffer.hasRemaining()) {
+            if (channel.read(buffer) < 0) break
+        }
+        return String(buffer.array(), Charsets.UTF_8).trimEnd('\u0000')
     }
 
     private fun exportExtension(track: SubtitleTrack, convertAssToVtt: Boolean): String =
