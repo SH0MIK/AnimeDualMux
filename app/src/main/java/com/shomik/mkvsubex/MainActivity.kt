@@ -2,6 +2,9 @@ package com.shomik.mkvsubex
 
 import android.net.Uri
 import android.os.Bundle
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -72,7 +75,7 @@ private data class SubtitleTrack(
 }
 
 private data class ScannedVideo(
-    val file: File,
+    val uri: Uri,
     val name: String,
     val tracks: List<SubtitleTrack>
 )
@@ -97,6 +100,8 @@ class MainActivity : ComponentActivity() {
         var extractAll by remember { mutableStateOf(true) }
         var convertAssToVtt by remember { mutableStateOf(true) }
         var busy by remember { mutableStateOf(false) }
+        var scanning by remember { mutableStateOf(false) }
+        var scanProgress by remember { mutableStateOf(0f) }
         var progress by remember { mutableStateOf(0f) }
         var status by remember { mutableStateOf("Choose one MKV or select multiple MKV files.") }
         var isError by remember { mutableStateOf(false) }
@@ -105,7 +110,13 @@ class MainActivity : ComponentActivity() {
         val singlePicker = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocument()
         ) { uri ->
-            if (uri != null) scanUris(listOf(uri), selected) { result, message ->
+            if (uri != null) scanUris(listOf(uri), selected, onProgress = { completed, total, name ->
+                scanning = true
+                scanProgress = completed.toFloat() / total.coerceAtLeast(1)
+                status = "Scanning $completed of $total: $name"
+            }) { result, message ->
+                scanning = false
+                scanProgress = 1f
                 videos = result
                 status = message
                 isError = result.isEmpty()
@@ -115,7 +126,13 @@ class MainActivity : ComponentActivity() {
         val bulkPicker = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenMultipleDocuments()
         ) { uris ->
-            if (uris.isNotEmpty()) scanUris(uris, selected) { result, message ->
+            if (uris.isNotEmpty()) scanUris(uris, selected, onProgress = { completed, total, name ->
+                scanning = true
+                scanProgress = completed.toFloat() / total.coerceAtLeast(1)
+                status = "Scanning $completed of $total: $name"
+            }) { result, message ->
+                scanning = false
+                scanProgress = 1f
                 videos = result
                 status = message
                 isError = result.isEmpty()
@@ -246,7 +263,7 @@ class MainActivity : ComponentActivity() {
                             color = Color(0xFF171F32),
                             modifier = Modifier.padding(vertical = 2.dp)
                         ) {
-                            Text("S", Modifier.padding(horizontal = 17.dp, vertical = 11.dp), color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Black, style = MaterialTheme.typography.headlineMedium)
+                            Image(painter = painterResource(id = R.drawable.mkv_subex_icon), contentDescription = "MKV SubEx app icon", modifier = Modifier.padding(7.dp), contentScale = ContentScale.Fit)
                         }
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text("MKV SubEx", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -280,7 +297,7 @@ class MainActivity : ComponentActivity() {
                             }
                             Button(
                                 onClick = { singlePicker.launch(arrayOf("video/*", "application/octet-stream")) },
-                                enabled = !busy,
+                                enabled = !busy && !scanning,
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(16.dp)
                             ) { Text("＋   Select a single file", Modifier.padding(vertical = 5.dp), fontWeight = FontWeight.Bold) }
@@ -447,6 +464,10 @@ class MainActivity : ComponentActivity() {
                                     Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
+                            if (scanning) {
+                                LinearProgressIndicator(progress = { scanProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                                Text("${(scanProgress.coerceIn(0f, 1f) * 100).toInt()}% scanned", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
+                            }
                             if (busy) {
                                 LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                                 Text("${(progress.coerceIn(0f, 1f) * 100).toInt()}% complete", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
@@ -461,40 +482,45 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun key(video: ScannedVideo, track: SubtitleTrack): String =
-        video.file.absolutePath + ":" + track.index
+        video.uri.toString() + ":" + track.index
 
     private fun scanUris(
         uris: List<Uri>,
         selected: SnapshotStateMap<String, Boolean>,
+        onProgress: (Int, Int, String) -> Unit,
         done: (List<ScannedVideo>, String) -> Unit
     ) {
-        done(emptyList(), "Scanning ${uris.size} file(s)…")
+        done(emptyList(), "Preparing to scan ${uris.size} file(s)…")
         worker.execute {
             val scanned = mutableListOf<ScannedVideo>()
             val failures = mutableListOf<String>()
             uris.forEachIndexed { index, uri ->
-                var localFile: File? = null
+                var name = "video_${index + 1}.mkv"
                 try {
-                    val name = contentResolver.query(
+                    name = contentResolver.query(
                         uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
                     )?.use { cursor ->
                         if (cursor.moveToFirst()) cursor.getString(0) else null
-                    } ?: "video_${index + 1}.mkv"
+                    } ?: name
+                    runOnUiThread { onProgress(index, uris.size, name) }
 
-                    localFile = File(cacheDir, "subtitle_input_${System.currentTimeMillis()}_${index}.mkv")
-                    contentResolver.openInputStream(uri).use { input ->
-                        requireNotNull(input) { "Could not read the selected file." }
-                        localFile.outputStream().buffered().use { output -> input.copyTo(output) }
+                    // Probe through the selected document descriptor; don't copy the entire video just to scan tracks.
+                    val descriptor = contentResolver.openFileDescriptor(uri, "r")
+                        ?: error("Could not open selected file.")
+                    val probeOutput = try {
+                        FFprobeKit.executeWithArguments(
+                            arrayOf("-v", "error", "-show_streams", "-of", "json", "/proc/self/fd/${descriptor.fd}")
+                        ).let { probe ->
+                            check(ReturnCode.isSuccess(probe.returnCode)) {
+                                "FFprobe could not read $name: ${probe.output.take(160)}"
+                            }
+                            probe.output
+                        }
+                    } finally {
+                        descriptor.close()
                     }
 
-                    val probe = FFprobeKit.executeWithArguments(
-                        arrayOf("-v", "error", "-show_streams", "-of", "json", localFile.absolutePath)
-                    )
-                    check(ReturnCode.isSuccess(probe.returnCode)) {
-                        "FFprobe could not read $name: ${probe.output.take(160)}"
-                    }
-
-                    val streams = JSONObject(probe.output).optJSONArray("streams")
+                    val streams = JSONObject(probeOutput).optJSONArray("streams")
                     val tracks = mutableListOf<SubtitleTrack>()
                     if (streams != null) {
                         for (i in 0 until streams.length()) {
@@ -509,11 +535,11 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
-                    scanned += ScannedVideo(localFile, name, tracks)
+                    scanned += ScannedVideo(uri, name, tracks)
                 } catch (e: Exception) {
-                    localFile?.delete()
-                    failures += e.message ?: "Could not scan file"
+                    failures += "$name: ${e.message ?: "Could not scan file"}"
                 }
+                runOnUiThread { onProgress(index + 1, uris.size, name) }
             }
 
             runOnUiThread {
@@ -622,6 +648,15 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun materializeForExport(video: ScannedVideo): File {
+        val local = File(cacheDir, "subtitle_input_export_${System.currentTimeMillis()}.mkv")
+        contentResolver.openInputStream(video.uri).use { input ->
+            requireNotNull(input) { "Could not read selected video for export." }
+            local.outputStream().buffered().use { output -> input.copyTo(output) }
+        }
+        return local
+    }
+
     private fun extract(
         video: ScannedVideo,
         track: SubtitleTrack,
@@ -639,11 +674,12 @@ class MainActivity : ComponentActivity() {
         } else {
             output
         }
+        val inputFile = materializeForExport(video)
         val args = arrayOf(
-            "-y", "-v", "error", "-i", video.file.absolutePath,
+            "-y", "-v", "error", "-i", inputFile.absolutePath,
             "-map", "0:${track.index}", "-c:s", "copy", intermediate.absolutePath
         )
-        val session = FFmpegKit.executeWithArguments(args)
+        val session = try { FFmpegKit.executeWithArguments(args) } finally { inputFile.delete() }
         if (!ReturnCode.isSuccess(session.returnCode) ||
             !intermediate.exists() || intermediate.length() == 0L
         ) {
