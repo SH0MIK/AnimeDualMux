@@ -1,0 +1,611 @@
+package com.shomik.mkvsubex
+
+import android.net.Uri
+import android.os.Bundle
+import android.provider.OpenableColumns
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.FFprobeKit
+import com.arthenica.ffmpegkit.ReturnCode
+import org.json.JSONObject
+import java.io.File
+import java.io.FileInputStream
+import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+private data class SubtitleTrack(
+    val index: Int,
+    val codec: String,
+    val language: String,
+    val title: String
+) {
+    val extension: String
+        get() = when (codec.lowercase(Locale.ROOT)) {
+            "ass" -> "ass"
+            "ssa" -> "ssa"
+            "subrip" -> "srt"
+            "webvtt" -> "vtt"
+            "hdmv_pgs_subtitle" -> "sup"
+            "dvd_subtitle" -> "sub"
+            else -> "mks"
+        }
+
+    val label: String
+        get() = "Track #$index · ${language.uppercase(Locale.ROOT)} · " +
+            (title.takeIf { it.isNotBlank() }?.let { "$it · " } ?: "") + codec
+}
+
+private data class ScannedVideo(
+    val file: File,
+    val name: String,
+    val tracks: List<SubtitleTrack>
+)
+
+class MainActivity : ComponentActivity() {
+    private val worker = Executors.newSingleThreadExecutor()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent { ExtractorScreen() }
+    }
+
+    override fun onDestroy() {
+        worker.shutdownNow()
+        super.onDestroy()
+    }
+
+    @Composable
+    private fun ExtractorScreen() {
+        var videos by remember { mutableStateOf<List<ScannedVideo>>(emptyList()) }
+        val selected = remember { mutableStateMapOf<String, Boolean>() }
+        var extractAll by remember { mutableStateOf(true) }
+        var convertAssToVtt by remember { mutableStateOf(true) }
+        var busy by remember { mutableStateOf(false) }
+        var progress by remember { mutableStateOf(0f) }
+        var status by remember { mutableStateOf("Choose one MKV or select multiple MKV files.") }
+        var isError by remember { mutableStateOf(false) }
+        var pendingSingle by remember { mutableStateOf<Pair<ScannedVideo, SubtitleTrack>?>(null) }
+
+        val singlePicker = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri != null) scanUris(listOf(uri), selected) { result, message ->
+                videos = result
+                status = message
+                isError = result.isEmpty()
+            }
+        }
+
+        val bulkPicker = rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenMultipleDocuments()
+        ) { uris ->
+            if (uris.isNotEmpty()) scanUris(uris, selected) { result, message ->
+                videos = result
+                status = message
+                isError = result.isEmpty()
+            }
+        }
+
+        val saveSingle = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/octet-stream")
+        ) { uri ->
+            val pair = pendingSingle
+            if (uri != null && pair != null) {
+                busy = true
+                isError = false
+                progress = 0.1f
+                worker.execute {
+                    try {
+                        val output = extract(pair.first, pair.second, convertAssToVtt)
+                        contentResolver.openOutputStream(uri).use { stream ->
+                            requireNotNull(stream) { "Could not open destination." }
+                            FileInputStream(output).use { it.copyTo(stream) }
+                        }
+                        output.delete()
+                        runOnUiThread {
+                            status = "Export complete: ${pair.second.label}"
+                            progress = 1f
+                            busy = false
+                        }
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            status = "Export failed: ${e.message ?: "unknown error"}"
+                            isError = true
+                            busy = false
+                        }
+                    }
+                }
+            }
+        }
+
+        val saveBulk = rememberLauncherForActivityResult(
+            ActivityResultContracts.CreateDocument("application/zip")
+        ) { uri ->
+            if (uri != null) {
+                val snapshot = videos
+                val chosen = snapshot.flatMap { video ->
+                    video.tracks.filter { extractAll || selected[key(video, it)] == true }
+                        .map { video to it }
+                }
+                if (chosen.isEmpty()) {
+                    status = "Select at least one subtitle track."
+                    isError = true
+                } else {
+                    busy = true
+                    isError = false
+                    progress = 0f
+                    worker.execute {
+                        try {
+                            val zipFile = File(cacheDir, "subtitle_export_${System.currentTimeMillis()}.zip")
+                            ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
+                                chosen.forEachIndexed { index, pair ->
+                                    runOnUiThread {
+                                        progress = index.toFloat() / chosen.size
+                                        status = "Extracting ${index + 1} of ${chosen.size}: ${pair.first.name}"
+                                    }
+                                    val output = extract(pair.first, pair.second, convertAssToVtt)
+                                    val base = pair.first.name.substringBeforeLast('.', pair.first.name)
+                                        .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                    val title = pair.second.title.takeIf { it.isNotBlank() }
+                                        ?.replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                    val entry = buildString {
+                                        append(base).append("/")
+                                        append("track_").append(pair.second.index).append("_")
+                                        if (title != null) append(title).append("_")
+                                        append(pair.second.language).append(".").append(exportExtension(pair.second, convertAssToVtt))
+                                    }
+                                    zip.putNextEntry(ZipEntry(entry))
+                                    FileInputStream(output).use { it.copyTo(zip) }
+                                    zip.closeEntry()
+                                    output.delete()
+                                }
+                            }
+                            contentResolver.openOutputStream(uri).use { stream ->
+                                requireNotNull(stream) { "Could not open ZIP destination." }
+                                FileInputStream(zipFile).use { it.copyTo(stream) }
+                            }
+                            zipFile.delete()
+                            runOnUiThread {
+                                status = "Bulk export complete: ${chosen.size} subtitle track(s) saved."
+                                progress = 1f
+                                busy = false
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                status = "Bulk export failed: ${e.message ?: "unknown error"}"
+                                isError = true
+                                busy = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        MaterialTheme(
+            colorScheme = darkColorScheme(
+                primary = Color(0xFFB8A6FF),
+                onPrimary = Color(0xFF211547),
+                secondary = Color(0xFF7DD3FC),
+                background = Color(0xFF0A0D14),
+                surface = Color(0xFF141925),
+                surfaceVariant = Color(0xFF20283A),
+                onSurface = Color(0xFFF1F3FA),
+                onSurfaceVariant = Color(0xFFB8C1D6),
+                error = Color(0xFFFF7A90)
+            )
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 22.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(26.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(22.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                "MKV SubEx",
+                                style = MaterialTheme.typography.headlineLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "SUBTITLE EXTRACTION STUDIO",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            Text(
+                                "Pull subtitle tracks from one or many MKV files. Everything is processed on your device — no video re-encoding.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { singlePicker.launch(arrayOf("video/*", "application/octet-stream")) },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Choose one file") }
+                        OutlinedButton(
+                            onClick = { bulkPicker.launch(arrayOf("video/*", "application/octet-stream")) },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Choose multiple") }
+                    }
+
+                    if (videos.isNotEmpty()) {
+                        Text(
+                            "${videos.size} file(s) · ${videos.sumOf { it.tracks.size }} subtitle track(s)",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+
+                        Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(
+                                        checked = convertAssToVtt,
+                                        onCheckedChange = { convertAssToVtt = it },
+                                        enabled = !busy
+                                    )
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Convert ASS/SSA to plain WebVTT (.vtt)")
+                                        Text(
+                                            "Strips formatting tags so AniVault Player can apply its own styling.",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(selected = extractAll, onClick = { extractAll = true })
+                                    Text("Extract all tracks")
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(selected = !extractAll, onClick = { extractAll = false })
+                                    Text("Select tracks manually")
+                                }
+                            }
+                        }
+
+                        videos.forEach { video ->
+                            Card(Modifier.fillMaxWidth()) {
+                                Column(
+                                    Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(video.name, style = MaterialTheme.typography.titleMedium)
+                                    if (video.tracks.isEmpty()) Text("No subtitle tracks found.")
+                                    video.tracks.forEach { track ->
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Checkbox(
+                                                checked = selected[key(video, track)] == true,
+                                                onCheckedChange = { selected[key(video, track)] = it },
+                                                enabled = !extractAll && !busy
+                                            )
+                                            Text(track.label, modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        val chosenCount = videos.sumOf { video ->
+                            video.tracks.count { extractAll || selected[key(video, it)] == true }
+                        }
+                        Button(
+                            onClick = {
+                                val video = videos.singleOrNull()
+                                val tracks = video?.tracks?.filter {
+                                    extractAll || selected[key(video, it)] == true
+                                }.orEmpty()
+                                if (video != null && tracks.size == 1) {
+                                    pendingSingle = video to tracks.first()
+                                    saveSingle.launch(
+                                        video.name.substringBeforeLast('.', video.name) +
+                                            "_track_${tracks.first().index}." +
+                                            exportExtension(tracks.first(), convertAssToVtt)
+                                    )
+                                } else if (chosenCount > 0) {
+                                    saveBulk.launch("subtitles_${videos.size}_files.zip")
+                                } else {
+                                    status = "No subtitle tracks selected."
+                                    isError = true
+                                }
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(if (videos.size == 1) "Export selected subtitle(s)" else "Export bulk ZIP")
+                        }
+                    }
+
+                    if (busy) {
+                        LinearProgressIndicator(
+                            progress = { progress.coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                if (isError) "NEEDS ATTENTION" else if (busy) "IN PROGRESS" else "STATUS",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary
+                            )
+                            Text(
+                                status,
+                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                    Text(
+                        "ASS/SSA styling is preserved when copied directly. PGS can be exported as SUP; bitmap subtitles are not OCR-converted to text.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+    }
+
+    private fun key(video: ScannedVideo, track: SubtitleTrack): String =
+        video.file.absolutePath + ":" + track.index
+
+    private fun scanUris(
+        uris: List<Uri>,
+        selected: SnapshotStateMap<String, Boolean>,
+        done: (List<ScannedVideo>, String) -> Unit
+    ) {
+        done(emptyList(), "Scanning ${uris.size} file(s)…")
+        worker.execute {
+            val scanned = mutableListOf<ScannedVideo>()
+            val failures = mutableListOf<String>()
+            uris.forEachIndexed { index, uri ->
+                var localFile: File? = null
+                try {
+                    val name = contentResolver.query(
+                        uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    } ?: "video_${index + 1}.mkv"
+
+                    localFile = File(cacheDir, "subtitle_input_${System.currentTimeMillis()}_${index}.mkv")
+                    contentResolver.openInputStream(uri).use { input ->
+                        requireNotNull(input) { "Could not read the selected file." }
+                        localFile.outputStream().buffered().use { output -> input.copyTo(output) }
+                    }
+
+                    val probe = FFprobeKit.executeWithArguments(
+                        arrayOf("-v", "error", "-show_streams", "-of", "json", localFile.absolutePath)
+                    )
+                    check(ReturnCode.isSuccess(probe.returnCode)) {
+                        "FFprobe could not read $name: ${probe.output.take(160)}"
+                    }
+
+                    val streams = JSONObject(probe.output).optJSONArray("streams")
+                    val tracks = mutableListOf<SubtitleTrack>()
+                    if (streams != null) {
+                        for (i in 0 until streams.length()) {
+                            val stream = streams.getJSONObject(i)
+                            if (stream.optString("codec_type") != "subtitle") continue
+                            val tags = stream.optJSONObject("tags") ?: JSONObject()
+                            tracks += SubtitleTrack(
+                                index = stream.optInt("index", i),
+                                codec = stream.optString("codec_name", "unknown"),
+                                language = tags.optString("language", "und"),
+                                title = tags.optString("title", "")
+                            )
+                        }
+                    }
+                    scanned += ScannedVideo(localFile, name, tracks)
+                } catch (e: Exception) {
+                    localFile?.delete()
+                    failures += e.message ?: "Could not scan file"
+                }
+            }
+
+            runOnUiThread {
+                selected.clear()
+                scanned.forEach { video ->
+                    video.tracks.forEach { selected[key(video, it)] = true }
+                }
+                done(
+                    scanned,
+                    if (failures.isEmpty()) "Scan complete. Review tracks, then export."
+                    else "Scanned ${scanned.size} file(s); ${failures.size} failed: ${failures.take(2).joinToString()}"
+                )
+            }
+        }
+    }
+
+    private fun exportExtension(track: SubtitleTrack, convertAssToVtt: Boolean): String =
+        if (convertAssToVtt && track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")) {
+            "vtt"
+        } else {
+            track.extension
+        }
+
+    private fun convertAssToPlainVtt(source: File, destination: File) {
+        val lines = source.readText(Charsets.UTF_8)
+            .removePrefix("\uFEFF")
+            .lines()
+        var inEvents = false
+        var fields = emptyList<String>()
+        data class VttCue(val startMillis: Long, val order: Int, val text: String)
+        val cues = mutableListOf<VttCue>()
+
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                inEvents = trimmed.equals("[Events]", ignoreCase = true)
+                continue
+            }
+            if (!inEvents) continue
+
+            if (trimmed.startsWith("Format:", ignoreCase = true)) {
+                fields = trimmed.substringAfter(":").split(",").map {
+                    it.trim().lowercase(Locale.ROOT)
+                }
+                continue
+            }
+            if (!trimmed.startsWith("Dialogue:", ignoreCase = true) || fields.isEmpty()) continue
+
+            val values = trimmed.substringAfter(":").trimStart().split(",", limit = fields.size)
+            if (values.size != fields.size) continue
+            val startIndex = fields.indexOf("start")
+            val endIndex = fields.indexOf("end")
+            val textIndex = fields.indexOf("text")
+            if (startIndex < 0 || endIndex < 0 || textIndex < 0) continue
+
+            val start = assTimeToVtt(values[startIndex].trim())
+            val end = assTimeToVtt(values[endIndex].trim())
+            val dialogue = stripAssOverrideBlocks(values[textIndex])
+                .replace(Regex("""<[^>]*>"""), "")
+                .replace("\\N", "\n")
+                .replace("\\n", "\n")
+                .replace("\\h", " ")
+                .replace(Regex("""\n[\t ]*\n+"""), "\n")
+                .trim()
+            if (dialogue.isEmpty()) continue
+            cues += VttCue(assTimeToMillis(values[startIndex].trim()), cues.size, "$start --> $end\n$dialogue")
+        }
+
+        check(cues.isNotEmpty()) { "No readable ASS/SSA dialogue cues were found." }
+        val sortedCues = cues.sortedWith(compareBy<VttCue> { it.startMillis }.thenBy { it.order })
+        destination.writeText("WEBVTT\n\n" + sortedCues.joinToString("\n\n") { it.text } + "\n", Charsets.UTF_8)
+    }
+
+    private fun stripAssOverrideBlocks(value: String): String {
+        val result = StringBuilder(value.length)
+        var inOverrideBlock = false
+        for (character in value) {
+            when (character) {
+                '{' -> inOverrideBlock = true
+                '}' -> if (inOverrideBlock) inOverrideBlock = false else result.append(character)
+                else -> if (!inOverrideBlock) result.append(character)
+            }
+        }
+        return result.toString()
+    }
+
+    private fun assTimeToMillis(value: String): Long {
+        val match = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{2})$""").matchEntire(value)
+            ?: error("Unrecognized ASS timestamp: $value")
+        val hours = match.groupValues[1].toLong()
+        val minutes = match.groupValues[2].toLong()
+        val seconds = match.groupValues[3].toLong()
+        val centiseconds = match.groupValues[4].toLong()
+        return (((hours * 60 + minutes) * 60 + seconds) * 1000) + centiseconds * 10
+    }
+
+    private fun assTimeToVtt(value: String): String {
+        val match = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{2})$""").matchEntire(value)
+            ?: error("Unrecognized ASS timestamp: $value")
+        val hours = match.groupValues[1].toLong()
+        val minutes = match.groupValues[2].toLong()
+        val seconds = match.groupValues[3].toLong()
+        val centiseconds = match.groupValues[4].toLong()
+        return "%02d:%02d:%02d.%03d".format(
+            Locale.ROOT, hours, minutes, seconds, centiseconds * 10
+        )
+    }
+
+    private fun extract(
+        video: ScannedVideo,
+        track: SubtitleTrack,
+        convertAssToVtt: Boolean
+    ): File {
+        val converting = convertAssToVtt &&
+            track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")
+        val extension = exportExtension(track, convertAssToVtt)
+        val output = File(
+            cacheDir,
+            "subtitle_track_${track.index}_${System.currentTimeMillis()}.$extension"
+        )
+        val intermediate = if (converting) {
+            File(cacheDir, "subtitle_source_${track.index}_${System.currentTimeMillis()}.ass")
+        } else {
+            output
+        }
+        val args = arrayOf(
+            "-y", "-v", "error", "-i", video.file.absolutePath,
+            "-map", "0:${track.index}", "-c:s", "copy", intermediate.absolutePath
+        )
+        val session = FFmpegKit.executeWithArguments(args)
+        if (!ReturnCode.isSuccess(session.returnCode) ||
+            !intermediate.exists() || intermediate.length() == 0L
+        ) {
+            output.delete()
+            intermediate.delete()
+            error(
+                "Track #${track.index} (${track.codec}) failed: " +
+                    (session.failStackTrace ?: session.output.take(200))
+            )
+        }
+        if (converting) {
+            try {
+                convertAssToPlainVtt(intermediate, output)
+            } finally {
+                intermediate.delete()
+            }
+        }
+        if (!ReturnCode.isSuccess(session.returnCode) || !output.exists() || output.length() == 0L) {
+            output.delete()
+            error(
+                "Track #${track.index} (${track.codec}) failed: " +
+                    (session.failStackTrace ?: session.output.take(200))
+            )
+        }
+        return output
+    }
+}
