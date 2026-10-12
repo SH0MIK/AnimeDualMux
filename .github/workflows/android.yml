@@ -34,7 +34,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MKV-Subtitle-Extractor-debug-apk
+          name: MKV-SubEx-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
