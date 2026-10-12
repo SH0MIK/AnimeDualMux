@@ -426,7 +426,8 @@ class MainActivity : ComponentActivity() {
             .lines()
         var inEvents = false
         var fields = emptyList<String>()
-        val cues = mutableListOf<String>()
+        data class VttCue(val startMillis: Long, val order: Int, val text: String)
+        val cues = mutableListOf<VttCue>()
 
         for (line in lines) {
             val trimmed = line.trim()
@@ -458,13 +459,15 @@ class MainActivity : ComponentActivity() {
                 .replace("\\N", "\n")
                 .replace("\\n", "\n")
                 .replace("\\h", " ")
+                .replace(Regex("""\n[\t ]*\n+"""), "\n")
                 .trim()
             if (dialogue.isEmpty()) continue
-            cues += "$start --> $end\n$dialogue"
+            cues += VttCue(assTimeToMillis(values[startIndex].trim()), cues.size, "$start --> $end\n$dialogue")
         }
 
         check(cues.isNotEmpty()) { "No readable ASS/SSA dialogue cues were found." }
-        destination.writeText("WEBVTT\n\n" + cues.joinToString("\n\n") + "\n", Charsets.UTF_8)
+        val sortedCues = cues.sortedWith(compareBy<VttCue> { it.startMillis }.thenBy { it.order })
+        destination.writeText("WEBVTT\n\n" + sortedCues.joinToString("\n\n") { it.text } + "\n", Charsets.UTF_8)
     }
 
     private fun stripAssOverrideBlocks(value: String): String {
@@ -478,6 +481,16 @@ class MainActivity : ComponentActivity() {
             }
         }
         return result.toString()
+    }
+
+    private fun assTimeToMillis(value: String): Long {
+        val match = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{2})$""").matchEntire(value)
+            ?: error("Unrecognized ASS timestamp: $value")
+        val hours = match.groupValues[1].toLong()
+        val minutes = match.groupValues[2].toLong()
+        val seconds = match.groupValues[3].toLong()
+        val centiseconds = match.groupValues[4].toLong()
+        return (((hours * 60 + minutes) * 60 + seconds) * 1000) + centiseconds * 10
     }
 
     private fun assTimeToVtt(value: String): String {
