@@ -453,8 +453,7 @@ class MainActivity : ComponentActivity() {
 
             val start = assTimeToVtt(values[startIndex].trim())
             val end = assTimeToVtt(values[endIndex].trim())
-            val dialogue = values[textIndex]
-                .replace(Regex("""\{[^}]*}"""), "")
+            val dialogue = stripAssOverrideBlocks(values[textIndex])
                 .replace(Regex("""<[^>]*>"""), "")
                 .replace("\\N", "\n")
                 .replace("\\n", "\n")
@@ -466,6 +465,19 @@ class MainActivity : ComponentActivity() {
 
         check(cues.isNotEmpty()) { "No readable ASS/SSA dialogue cues were found." }
         destination.writeText("WEBVTT\n\n" + cues.joinToString("\n\n") + "\n", Charsets.UTF_8)
+    }
+
+    private fun stripAssOverrideBlocks(value: String): String {
+        val result = StringBuilder(value.length)
+        var inOverrideBlock = false
+        for (character in value) {
+            when (character) {
+                '{' -> inOverrideBlock = true
+                '}' -> if (inOverrideBlock) inOverrideBlock = false else result.append(character)
+                else -> if (!inOverrideBlock) result.append(character)
+            }
+        }
+        return result.toString()
     }
 
     private fun assTimeToVtt(value: String): String {
