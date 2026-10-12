@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -24,6 +25,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -33,6 +35,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.FFprobeKit
@@ -214,29 +218,65 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        MaterialTheme {
+        MaterialTheme(
+            colorScheme = darkColorScheme(
+                primary = Color(0xFFB8A6FF),
+                onPrimary = Color(0xFF211547),
+                secondary = Color(0xFF7DD3FC),
+                background = Color(0xFF0A0D14),
+                surface = Color(0xFF141925),
+                surfaceVariant = Color(0xFF20283A),
+                onSurface = Color(0xFFF1F3FA),
+                onSurfaceVariant = Color(0xFFB8C1D6),
+                error = Color(0xFFFF7A90)
+            )
+        ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
                 color = MaterialTheme.colorScheme.background
             ) {
                 Column(
-                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 22.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Text("MKV Subtitle Extractor", style = MaterialTheme.typography.headlineLarge)
-                    Text("Extract subtitle tracks from one or many MKV files. Processing stays on your device; videos are not re-encoded.")
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(26.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(22.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                "MKV SubEx",
+                                style = MaterialTheme.typography.headlineLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                "SUBTITLE EXTRACTION STUDIO",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            Text(
+                                "Pull subtitle tracks from one or many MKV files. Everything is processed on your device — no video re-encoding.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
                             onClick = { singlePicker.launch(arrayOf("video/*", "application/octet-stream")) },
                             enabled = !busy,
                             modifier = Modifier.weight(1f)
-                        ) { Text("Select one MKV") }
+                        ) { Text("Choose one file") }
                         OutlinedButton(
                             onClick = { bulkPicker.launch(arrayOf("video/*", "application/octet-stream")) },
                             enabled = !busy,
                             modifier = Modifier.weight(1f)
-                        ) { Text("Bulk select") }
+                        ) { Text("Choose multiple") }
                     }
 
                     if (videos.isNotEmpty()) {
@@ -245,8 +285,8 @@ class MainActivity : ComponentActivity() {
                             style = MaterialTheme.typography.titleMedium
                         )
 
-                        Card(Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(10.dp)) {
+                        Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Checkbox(
                                         checked = convertAssToVtt,
@@ -275,8 +315,8 @@ class MainActivity : ComponentActivity() {
                         videos.forEach { video ->
                             Card(Modifier.fillMaxWidth()) {
                                 Column(
-                                    Modifier.padding(10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                                    Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(video.name, style = MaterialTheme.typography.titleMedium)
                                     if (video.tracks.isEmpty()) Text("No subtitle tracks found.")
@@ -330,10 +370,25 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
-                    Text(
-                        status,
-                        color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-                    )
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                if (isError) "NEEDS ATTENTION" else if (busy) "IN PROGRESS" else "STATUS",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary
+                            )
+                            Text(
+                                status,
+                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
                     Text(
                         "ASS/SSA styling is preserved when copied directly. PGS can be exported as SUP; bitmap subtitles are not OCR-converted to text.",
                         style = MaterialTheme.typography.bodySmall
