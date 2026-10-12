@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -263,7 +264,7 @@ class MainActivity : ComponentActivity() {
                             color = Color(0xFF171F32),
                             modifier = Modifier.padding(vertical = 2.dp)
                         ) {
-                            Image(painter = painterResource(id = R.drawable.mkv_subex_icon), contentDescription = "MKV SubEx app icon", modifier = Modifier.padding(7.dp), contentScale = ContentScale.Fit)
+                            Image(painter = painterResource(id = R.drawable.mkv_subex_icon), contentDescription = "MKV SubEx app icon", modifier = Modifier.size(44.dp).padding(2.dp), contentScale = ContentScale.Fit)
                         }
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text("MKV SubEx", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
