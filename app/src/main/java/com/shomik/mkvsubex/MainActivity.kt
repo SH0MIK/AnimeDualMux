@@ -191,36 +191,46 @@ class MainActivity : ComponentActivity() {
                     isError = false
                     progress = 0f
                     worker.execute {
+                        val inputFiles = linkedMapOf<String, File>()
+                        var zipFile: File? = null
                         try {
-                            val zipFile = File(cacheDir, "subtitle_export_${System.currentTimeMillis()}.zip")
+                            zipFile = File(cacheDir, "subtitle_export_${System.currentTimeMillis()}.zip")
                             ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
                                 chosen.forEachIndexed { index, pair ->
                                     runOnUiThread {
                                         progress = index.toFloat() / chosen.size
                                         status = "Extracting ${index + 1} of ${chosen.size}: ${pair.first.name}"
                                     }
-                                    val output = extract(pair.first, pair.second, convertAssToVtt)
-                                    val base = pair.first.name.substringBeforeLast('.', pair.first.name)
-                                        .replace(Regex("[^A-Za-z0-9._ -]"), "_")
-                                    val title = pair.second.title.takeIf { it.isNotBlank() }
-                                        ?.replace(Regex("[^A-Za-z0-9._ -]"), "_")
-                                    val entry = buildString {
-                                        append(base).append("/")
-                                        append("track_").append(pair.second.index).append("_")
-                                        if (title != null) append(title).append("_")
-                                        append(pair.second.language).append(".").append(exportExtension(pair.second, convertAssToVtt))
+                                    // Materialize each source MKV once, then reuse it for every
+                                    // selected subtitle track from that file.
+                                    val inputKey = pair.first.uri.toString()
+                                    val inputFile = inputFiles.getOrPut(inputKey) {
+                                        materializeForExport(pair.first)
                                     }
-                                    zip.putNextEntry(ZipEntry(entry))
-                                    FileInputStream(output).use { it.copyTo(zip) }
-                                    zip.closeEntry()
-                                    output.delete()
+                                    val output = extract(pair.first, pair.second, convertAssToVtt, inputFile)
+                                    try {
+                                        val base = pair.first.name.substringBeforeLast('.', pair.first.name)
+                                            .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                        val title = pair.second.title.takeIf { it.isNotBlank() }
+                                            ?.replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                        val entry = buildString {
+                                            append(base).append("/")
+                                            append("track_").append(pair.second.index).append("_")
+                                            if (title != null) append(title).append("_")
+                                            append(pair.second.language).append(".").append(exportExtension(pair.second, convertAssToVtt))
+                                        }
+                                        zip.putNextEntry(ZipEntry(entry))
+                                        FileInputStream(output).use { it.copyTo(zip) }
+                                        zip.closeEntry()
+                                    } finally {
+                                        output.delete()
+                                    }
                                 }
                             }
                             contentResolver.openOutputStream(uri).use { stream ->
                                 requireNotNull(stream) { "Could not open ZIP destination." }
                                 FileInputStream(zipFile).use { it.copyTo(stream) }
                             }
-                            zipFile.delete()
                             runOnUiThread {
                                 status = "Bulk export complete: ${chosen.size} subtitle track(s) saved."
                                 progress = 1f
@@ -232,6 +242,9 @@ class MainActivity : ComponentActivity() {
                                 isError = true
                                 busy = false
                             }
+                        } finally {
+                            inputFiles.values.forEach { it.delete() }
+                            zipFile?.delete()
                         }
                     }
                 }
@@ -806,7 +819,8 @@ class MainActivity : ComponentActivity() {
     private fun extract(
         video: ScannedVideo,
         track: SubtitleTrack,
-        convertAssToVtt: Boolean
+        convertAssToVtt: Boolean,
+        sourceFile: File? = null
     ): File {
         val converting = convertAssToVtt &&
             track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")
@@ -820,12 +834,17 @@ class MainActivity : ComponentActivity() {
         } else {
             output
         }
-        val inputFile = materializeForExport(video)
+        val inputFile = sourceFile ?: materializeForExport(video)
+        val ownsInputFile = sourceFile == null
         val args = arrayOf(
             "-y", "-v", "error", "-i", inputFile.absolutePath,
             "-map", "0:s:${track.streamIndex}", "-c:s", "copy", intermediate.absolutePath
         )
-        val session = try { FFmpegKit.executeWithArguments(args) } finally { inputFile.delete() }
+        val session = try {
+            FFmpegKit.executeWithArguments(args)
+        } finally {
+            if (ownsInputFile) inputFile.delete()
+        }
         if (!ReturnCode.isSuccess(session.returnCode) ||
             !intermediate.exists() || intermediate.length() == 0L
         ) {
