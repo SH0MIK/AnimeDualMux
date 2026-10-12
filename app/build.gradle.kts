@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.shomik.animedualmux"
+    namespace = "com.shomik.mkvsubex"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.shomik.animedualmux"
+        applicationId = "com.shomik.mkvsubex"
         minSdk = 26
         targetSdk = 35
         versionCode = 2
