@@ -56,6 +56,7 @@ import java.util.zip.ZipOutputStream
 
 private data class SubtitleTrack(
     val index: Int,
+    val streamIndex: Int,
     val codec: String,
     val language: String,
     val title: String
@@ -578,6 +579,7 @@ class MainActivity : ComponentActivity() {
         val tracks = tracksElement ?: error("Could not locate the MKV Tracks metadata.")
         val tracksEnd = minOf(tracks.end, segmentEnd)
         val result = mutableListOf<SubtitleTrack>()
+        var subtitleStreamIndex = 0
         position = tracks.dataStart
         while (position < tracksEnd) {
             channel.position(position)
@@ -607,6 +609,7 @@ class MainActivity : ComponentActivity() {
                 if (trackType == 0x11) {
                     result += SubtitleTrack(
                         index = trackNumber,
+                        streamIndex = subtitleStreamIndex++,
                         codec = when (codec) {
                             "S_TEXT/ASS" -> "ass"
                             "S_TEXT/SSA" -> "ssa"
@@ -820,7 +823,7 @@ class MainActivity : ComponentActivity() {
         val inputFile = materializeForExport(video)
         val args = arrayOf(
             "-y", "-v", "error", "-i", inputFile.absolutePath,
-            "-map", "0:${track.index}", "-c:s", "copy", intermediate.absolutePath
+            "-map", "0:s:${track.streamIndex}", "-c:s", "copy", intermediate.absolutePath
         )
         val session = try { FFmpegKit.executeWithArguments(args) } finally { inputFile.delete() }
         if (!ReturnCode.isSuccess(session.returnCode) ||
