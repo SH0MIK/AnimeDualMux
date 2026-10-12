@@ -221,113 +221,185 @@ class MainActivity : ComponentActivity() {
         MaterialTheme(
             colorScheme = darkColorScheme(
                 primary = Color(0xFFB8A6FF),
-                onPrimary = Color(0xFF211547),
-                secondary = Color(0xFF7DD3FC),
-                background = Color(0xFF0A0D14),
-                surface = Color(0xFF141925),
-                surfaceVariant = Color(0xFF20283A),
-                onSurface = Color(0xFFF1F3FA),
-                onSurfaceVariant = Color(0xFFB8C1D6),
-                error = Color(0xFFFF7A90)
+                onPrimary = Color(0xFF17112E),
+                secondary = Color(0xFF73DDF5),
+                background = Color(0xFF080B12),
+                surface = Color(0xFF111724),
+                surfaceVariant = Color(0xFF1B2434),
+                onSurface = Color(0xFFF3F5FC),
+                onSurfaceVariant = Color(0xFFAAB6CC),
+                error = Color(0xFFFF8196)
             )
         ) {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = MaterialTheme.colorScheme.background
-            ) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 Column(
-                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 22.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(26.dp)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Column(
-                            modifier = Modifier.padding(22.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = Color(0xFF171F32),
+                            modifier = Modifier.padding(vertical = 2.dp)
                         ) {
-                            Text(
-                                "MKV SubEx",
-                                style = MaterialTheme.typography.headlineLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                "SUBTITLE EXTRACTION STUDIO",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.secondary
-                            )
-                            Text(
-                                "Pull subtitle tracks from one or many MKV files. Everything is processed on your device — no video re-encoding.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Text("S", Modifier.padding(horizontal = 17.dp, vertical = 11.dp), color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Black, style = MaterialTheme.typography.headlineMedium)
+                        }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("MKV SubEx", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Text("SUBTITLE WORKSPACE", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                        }
+                        Surface(shape = RoundedCornerShape(50), color = Color(0xFF132C2C)) {
+                            Text("ON-DEVICE", Modifier.padding(horizontal = 10.dp, vertical = 7.dp), color = Color(0xFF83E6CB), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { singlePicker.launch(arrayOf("video/*", "application/octet-stream")) },
-                            enabled = !busy,
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Choose one file") }
-                        OutlinedButton(
-                            onClick = { bulkPicker.launch(arrayOf("video/*", "application/octet-stream")) },
-                            enabled = !busy,
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Choose multiple") }
+                    Column(
+                        Modifier.fillMaxWidth().padding(top = 2.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("Your subtitles.\nReady to export.", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.ExtraBold, lineHeight = MaterialTheme.typography.headlineLarge.lineHeight, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Extract subtitle tracks from MKV files without re-encoding the video.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(26.dp),
+                        colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = Color(0xFF131D30))
+                    ) {
+                        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text("START A SESSION", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                                    Text("Choose your MKV files", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                }
+                                Text("↗", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.headlineMedium)
+                            }
+                            Button(
+                                onClick = { singlePicker.launch(arrayOf("video/*", "application/octet-stream")) },
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp)
+                            ) { Text("＋   Select a single file", Modifier.padding(vertical = 5.dp), fontWeight = FontWeight.Bold) }
+                            OutlinedButton(
+                                onClick = { bulkPicker.launch(arrayOf("video/*", "application/octet-stream")) },
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp)
+                            ) { Text("Select multiple files", Modifier.padding(vertical = 4.dp)) }
+                            Text("Files stay on your device. No upload, no video re-encoding.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
 
                     if (videos.isNotEmpty()) {
-                        Text(
-                            "${videos.size} file(s) · ${videos.sumOf { it.tracks.size }} subtitle track(s)",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-
-                        Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Checkbox(
-                                        checked = convertAssToVtt,
-                                        onCheckedChange = { convertAssToVtt = it },
-                                        enabled = !busy
-                                    )
-                                    Column(Modifier.weight(1f)) {
-                                        Text("Convert ASS/SSA to plain WebVTT (.vtt)")
-                                        Text(
-                                            "Strips formatting tags so AniVault Player can apply its own styling.",
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    RadioButton(selected = extractAll, onClick = { extractAll = true })
-                                    Text("Extract all tracks")
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    RadioButton(selected = !extractAll, onClick = { extractAll = false })
-                                    Text("Select tracks manually")
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text("YOUR SESSION", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                                Text("Files & subtitle tracks", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            }
+                            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                                Column(Modifier.padding(horizontal = 13.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("${videos.size}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                    Text("FILES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
                         }
 
-                        videos.forEach { video ->
-                            Card(Modifier.fillMaxWidth()) {
-                                Column(
-                                    Modifier.padding(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(video.name, style = MaterialTheme.typography.titleMedium)
-                                    if (video.tracks.isEmpty()) Text("No subtitle tracks found.")
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                            Surface(Modifier.weight(1f), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface) {
+                                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text("${videos.sumOf { it.tracks.size }}", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                    Text("Subtitle tracks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            Surface(Modifier.weight(1f), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface) {
+                                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(if (extractAll) "ALL" else "CUSTOM", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
+                                    Text("Selection mode", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+
+                        Card(
+                            Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(22.dp),
+                            colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text("EXPORT SETTINGS", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        Text("Convert ASS / SSA to VTT", fontWeight = FontWeight.SemiBold)
+                                        Text("Plain WebVTT with formatting tags removed", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Checkbox(checked = convertAssToVtt, onCheckedChange = { convertAssToVtt = it }, enabled = !busy)
+                                }
+                                androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(selected = extractAll, onClick = { extractAll = true }, enabled = !busy)
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Export every track", fontWeight = if (extractAll) FontWeight.SemiBold else FontWeight.Normal)
+                                        Text("Fastest way to export the whole file", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(selected = !extractAll, onClick = { extractAll = false }, enabled = !busy)
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Choose tracks manually", fontWeight = if (!extractAll) FontWeight.SemiBold else FontWeight.Normal)
+                                        Text("Pick only the languages you need", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+
+                        videos.forEachIndexed { videoIndex, video ->
+                            Card(
+                                Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(22.dp),
+                                colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                            ) {
+                                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                                            Text("MKV", Modifier.padding(horizontal = 10.dp, vertical = 9.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                                        }
+                                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                            Text(video.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                            Text("${video.tracks.size} subtitle track(s)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                    if (video.tracks.isEmpty()) {
+                                        Text("No subtitle tracks found in this file.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+                                    }
                                     video.tracks.forEach { track ->
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Checkbox(
-                                                checked = selected[key(video, track)] == true,
-                                                onCheckedChange = { selected[key(video, track)] = it },
-                                                enabled = !extractAll && !busy
-                                            )
-                                            Text(track.label, modifier = Modifier.weight(1f))
+                                        Surface(
+                                            Modifier.fillMaxWidth(),
+                                            shape = RoundedCornerShape(14.dp),
+                                            color = if (selected[key(video, track)] == true && !extractAll) Color(0xFF202A40) else Color(0xFF151C29)
+                                        ) {
+                                            Row(
+                                                Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Checkbox(
+                                                    checked = selected[key(video, track)] == true,
+                                                    onCheckedChange = { selected[key(video, track)] = it },
+                                                    enabled = !extractAll && !busy
+                                                )
+                                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                                    Text(track.title.takeIf { it.isNotBlank() } ?: track.language.uppercase(Locale.ROOT), fontWeight = FontWeight.SemiBold)
+                                                    Text("Track ${track.index}  ·  ${track.codec.uppercase(Locale.ROOT)}  ·  ${track.language.uppercase(Locale.ROOT)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                }
+                                                if (convertAssToVtt && track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")) {
+                                                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF183638)) {
+                                                        Text("VTT", Modifier.padding(horizontal = 7.dp, vertical = 5.dp), style = MaterialTheme.typography.labelSmall, color = Color(0xFF80E5E1), fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -340,14 +412,11 @@ class MainActivity : ComponentActivity() {
                         Button(
                             onClick = {
                                 val video = videos.singleOrNull()
-                                val tracks = video?.tracks?.filter {
-                                    extractAll || selected[key(video, it)] == true
-                                }.orEmpty()
+                                val tracks = video?.tracks?.filter { extractAll || selected[key(video, it)] == true }.orEmpty()
                                 if (video != null && tracks.size == 1) {
                                     pendingSingle = video to tracks.first()
                                     saveSingle.launch(
-                                        video.name.substringBeforeLast('.', video.name) +
-                                            "_track_${tracks.first().index}." +
+                                        video.name.substringBeforeLast('.', video.name) + "_track_${tracks.first().index}." +
                                             exportExtension(tracks.first(), convertAssToVtt)
                                     )
                                 } else if (chosenCount > 0) {
@@ -357,42 +426,35 @@ class MainActivity : ComponentActivity() {
                                     isError = true
                                 }
                             },
-                            enabled = !busy,
-                            modifier = Modifier.fillMaxWidth()
+                            enabled = !busy && chosenCount > 0,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp)
                         ) {
-                            Text(if (videos.size == 1) "Export selected subtitle(s)" else "Export bulk ZIP")
+                            Text("Export ${chosenCount} subtitle track(s)", Modifier.padding(vertical = 6.dp), fontWeight = FontWeight.Bold)
                         }
                     }
 
-                    if (busy) {
-                        LinearProgressIndicator(
-                            progress = { progress.coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
                     Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp)
+                        Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = if (isError) Color(0xFF321923) else Color(0xFF121C2B))
                     ) {
-                        Column(
-                            modifier = Modifier.padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                if (isError) "NEEDS ATTENTION" else if (busy) "IN PROGRESS" else "STATUS",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary
-                            )
-                            Text(
-                                status,
-                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-                            )
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(if (isError) "!" else if (busy) "↻" else "✓", color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                                Column(Modifier.weight(1f).padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(if (isError) "Something needs attention" else if (busy) "Export in progress" else "Activity status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                    Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            if (busy) {
+                                LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                                Text("${(progress.coerceIn(0f, 1f) * 100).toInt()}% complete", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
+                            }
                         }
                     }
-                    Text(
-                        "ASS/SSA styling is preserved when copied directly. PGS can be exported as SUP; bitmap subtitles are not OCR-converted to text.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                    Text("ASS/SSA can be converted to plain VTT. PGS tracks export as SUP; image-based subtitles are not OCR-converted.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("MKV SubEx  •  Private by design", Modifier.fillMaxWidth().padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = Color(0xFF69778E))
                 }
             }
         }
