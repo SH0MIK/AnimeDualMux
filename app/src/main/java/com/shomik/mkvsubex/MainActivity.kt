@@ -84,8 +84,17 @@ private data class ScannedVideo(
     val tracks: List<SubtitleTrack>
 )
 
+private val ASS_TIME_REGEX = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{2})$""")
+private val HTML_TAG_REGEX = Regex("""<[^>]*>""")
+private val BLANK_LINES_REGEX = Regex("""\n[\t ]*\n+""")
+
 class MainActivity : ComponentActivity() {
     private val worker = Executors.newSingleThreadExecutor()
+
+    // Several MKVs are read at the same time during bulk export.
+    private val extractPool = Executors.newFixedThreadPool(
+        Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,6 +103,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         worker.shutdownNow()
+        extractPool.shutdownNow()
         super.onDestroy()
     }
 
@@ -196,36 +206,57 @@ class MainActivity : ComponentActivity() {
                         try {
                             zipFile = File(cacheDir, "subtitle_export_${System.currentTimeMillis()}.zip")
                             ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
+                                zip.setLevel(java.util.zip.Deflater.BEST_SPEED)
                                 var completed = 0
-                                val groups = chosen.groupBy { it.first.uri.toString() }
-                                groups.values.forEach { group ->
-                                    val video = group.first().first
-                                    runOnUiThread {
-                                        progress = completed.toFloat() / chosen.size
-                                        status = "Extracting ${group.size} track(s): ${video.name}"
-                                    }
-                                    val outputs = extractMultiple(video, group.map { it.second }, convertAssToVtt)
-                                    try {
-                                        group.forEach { pair ->
-                                            val output = outputs.getValue(pair.second)
-                                            val base = pair.first.name.substringBeforeLast('.', pair.first.name)
-                                                .replace(Regex("[^A-Za-z0-9._ -]"), "_")
-                                            val title = pair.second.title.takeIf { it.isNotBlank() }
-                                                ?.replace(Regex("[^A-Za-z0-9._ -]"), "_")
-                                            val entry = buildString {
-                                                append(base).append("/")
-                                                append("track_").append(pair.second.index).append("_")
-                                                if (title != null) append(title).append("_")
-                                                append(pair.second.language).append(".").append(exportExtension(pair.second, convertAssToVtt))
-                                            }
-                                            zip.putNextEntry(ZipEntry(entry))
-                                            FileInputStream(output).use { it.copyTo(zip) }
-                                            zip.closeEntry()
-                                            completed++
-                                            runOnUiThread { progress = completed.toFloat() / chosen.size }
+                                val groups = chosen.groupBy { it.first.uri.toString() }.values.toList()
+                                // Extract several files in parallel; ZIP entries are still written in order.
+                                val futures = groups.map { group ->
+                                    extractPool.submit(java.util.concurrent.Callable<Map<SubtitleTrack, File>> {
+                                        extractMultiple(group.first().first, group.map { it.second }, convertAssToVtt)
+                                    })
+                                }
+                                try {
+                                    groups.forEachIndexed { groupIndex, group ->
+                                        val video = group.first().first
+                                        runOnUiThread {
+                                            progress = completed.toFloat() / chosen.size
+                                            status = "Exporting ${groupIndex + 1} of ${groups.size}: ${video.name}"
                                         }
-                                    } finally {
-                                        outputs.values.forEach { it.delete() }
+                                        val outputs = try {
+                                            futures[groupIndex].get()
+                                        } catch (e: java.util.concurrent.ExecutionException) {
+                                            throw (e.cause as? Exception) ?: e
+                                        }
+                                        try {
+                                            group.forEach { pair ->
+                                                val output = outputs.getValue(pair.second)
+                                                val base = pair.first.name.substringBeforeLast('.', pair.first.name)
+                                                    .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                                val title = pair.second.title.takeIf { it.isNotBlank() }
+                                                    ?.replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                                val entry = buildString {
+                                                    append(base).append("/")
+                                                    append("track_").append(pair.second.index).append("_")
+                                                    if (title != null) append(title).append("_")
+                                                    append(pair.second.language).append(".").append(exportExtension(pair.second, convertAssToVtt))
+                                                }
+                                                zip.putNextEntry(ZipEntry(entry))
+                                                FileInputStream(output).use { it.copyTo(zip) }
+                                                zip.closeEntry()
+                                                completed++
+                                                runOnUiThread { progress = completed.toFloat() / chosen.size }
+                                            }
+                                        } finally {
+                                            outputs.values.forEach { it.delete() }
+                                        }
+                                    }
+                                } finally {
+                                    futures.forEach { f ->
+                                        if (!f.isDone) {
+                                            f.cancel(true)
+                                        } else {
+                                            try { f.get().values.forEach { it.delete() } } catch (_: Exception) {}
+                                        }
                                     }
                                 }
                             }
@@ -762,11 +793,11 @@ class MainActivity : ComponentActivity() {
             val start = assTimeToVtt(values[startIndex].trim())
             val end = assTimeToVtt(values[endIndex].trim())
             val dialogue = stripAssOverrideBlocks(values[textIndex])
-                .replace(Regex("""<[^>]*>"""), "")
+                .replace(HTML_TAG_REGEX, "")
                 .replace("\\N", "\n")
                 .replace("\\n", "\n")
                 .replace("\\h", " ")
-                .replace(Regex("""\n[\t ]*\n+"""), "\n")
+                .replace(BLANK_LINES_REGEX, "\n")
                 .trim()
             if (dialogue.isEmpty()) continue
             cues += VttCue(assTimeToMillis(values[startIndex].trim()), cues.size, "$start --> $end\n$dialogue")
@@ -791,7 +822,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun assTimeToMillis(value: String): Long {
-        val match = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{2})$""").matchEntire(value)
+        val match = ASS_TIME_REGEX.matchEntire(value)
             ?: error("Unrecognized ASS timestamp: $value")
         val hours = match.groupValues[1].toLong()
         val minutes = match.groupValues[2].toLong()
@@ -801,7 +832,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun assTimeToVtt(value: String): String {
-        val match = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{2})$""").matchEntire(value)
+        val match = ASS_TIME_REGEX.matchEntire(value)
             ?: error("Unrecognized ASS timestamp: $value")
         val hours = match.groupValues[1].toLong()
         val minutes = match.groupValues[2].toLong()
@@ -980,6 +1011,15 @@ class MainActivity : ComponentActivity() {
                 val segEnd = if (seg.size < 0) fileSize else minOf(seg.end, fileSize)
                 var timecodeScale = 1_000_000L
 
+                // Fast path: jump straight to the subtitle blocks using the Cues index.
+                // Tracks that can't be verified as complete fall back to the full scan below.
+                val fastDone: Set<SubtitleTrack> = try {
+                    extractViaCues(reader, seg.dataStart, segEnd, wanted, cues)
+                } catch (_: Exception) {
+                    emptySet()
+                }
+                val scanWanted = wanted.filterValues { it !in fastDone }
+
                 fun processCluster(cluster: EbmlElement): Long {
                     val clusterEnd = if (cluster.size < 0) segEnd else cluster.end
                     var clusterTs = 0L
@@ -992,7 +1032,7 @@ class MainActivity : ComponentActivity() {
                         for (i in 1 until trackLen) {
                             trackNo = (trackNo shl 8) or reader.u8(start + i).coerceAtLeast(0).toLong()
                         }
-                        val track = wanted[trackNo] ?: return   // not ours: payload is skipped untouched
+                        val track = scanWanted[trackNo] ?: return   // not ours: payload is skipped untouched
                         val headerLen = trackLen + 3
                         val rel = ((reader.u8(start + trackLen).coerceAtLeast(0) shl 8) or
                             reader.u8(start + trackLen + 1).coerceAtLeast(0)).toShort().toLong()
@@ -1039,7 +1079,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 position = seg.dataStart
-                while (position < segEnd) {
+                if (scanWanted.isNotEmpty()) while (position < segEnd) {
                     val e = readHeader(reader, position, segEnd) ?: break
                     if (e.id == 0x1F43B675L) {
                         val next = processCluster(e)
@@ -1099,6 +1139,232 @@ class MainActivity : ComponentActivity() {
             created.forEach { it.delete() }
             throw e
         }
+    }
+
+    private class CueRef(val clusterPos: Long, val relPos: Long)
+
+    /**
+     * Reads subtitle blocks directly via the Cues index (a few KB of I/O instead of the
+     * whole file). A track is only accepted when it is provably complete: ASS/SSA ReadOrder
+     * values must be exactly 0..N-1. Anything else is left for the full scan.
+     */
+    private fun extractViaCues(
+        reader: MkvBlockReader,
+        segmentStart: Long,
+        segmentEnd: Long,
+        wanted: Map<Long, SubtitleTrack>,
+        cues: Map<SubtitleTrack, MutableList<RawCue>>
+    ): Set<SubtitleTrack> {
+        val clusterId = 0x1F43B675L
+        val cuesId = 0x1C53BB6BL
+        var timecodeScale = 1_000_000L
+        var cuesAt = -1L
+
+        // Header region = everything before the first Cluster.
+        var position = segmentStart
+        while (position < segmentEnd) {
+            val e = readHeader(reader, position, segmentEnd) ?: break
+            if (e.id == clusterId || e.size < 0) break
+            when (e.id) {
+                0x1549A966L -> {
+                    var p = e.dataStart
+                    while (p < e.end) {
+                        val c = readHeader(reader, p, e.end) ?: break
+                        if (c.size < 0) break
+                        if (c.id == 0x2AD7B1L) {
+                            val v = reader.unsigned(c.dataStart, c.size)
+                            if (v > 0) timecodeScale = v
+                        }
+                        p = c.end
+                    }
+                }
+                0x114D9B74L -> {
+                    var p = e.dataStart
+                    while (p < e.end) {
+                        val seek = readHeader(reader, p, e.end) ?: break
+                        if (seek.size < 0) break
+                        if (seek.id == 0x4DBBL) {
+                            var seekId = -1L
+                            var seekPos = -1L
+                            var q = seek.dataStart
+                            while (q < seek.end) {
+                                val f = readHeader(reader, q, seek.end) ?: break
+                                if (f.size < 0) break
+                                if (f.id == 0x53ABL) seekId = reader.unsigned(f.dataStart, f.size)
+                                else if (f.id == 0x53ACL) seekPos = reader.unsigned(f.dataStart, f.size)
+                                q = f.end
+                            }
+                            if (seekId == cuesId && seekPos >= 0) cuesAt = segmentStart + seekPos
+                        }
+                        p = seek.end
+                    }
+                }
+                cuesId -> cuesAt = position
+            }
+            if (e.end <= position) break
+            position = e.end
+        }
+        if (cuesAt < 0) return emptySet()
+
+        val cuesEl = readHeader(reader, cuesAt, segmentEnd) ?: return emptySet()
+        if (cuesEl.id != cuesId || cuesEl.size < 0) return emptySet()
+
+        val refs = HashMap<Long, MutableList<CueRef>>()
+        val broken = HashSet<Long>()
+        var cp = cuesEl.dataStart
+        while (cp < cuesEl.end) {
+            val point = readHeader(reader, cp, cuesEl.end) ?: break
+            if (point.size < 0) return emptySet()
+            if (point.id == 0xBBL) {
+                var q = point.dataStart
+                while (q < point.end) {
+                    val tp = readHeader(reader, q, point.end) ?: break
+                    if (tp.size < 0) return emptySet()
+                    if (tp.id == 0xB7L) {
+                        var trackNo = -1L
+                        var clusterPos = -1L
+                        var relPos = -1L
+                        var r = tp.dataStart
+                        while (r < tp.end) {
+                            val f = readHeader(reader, r, tp.end) ?: break
+                            if (f.size < 0) return emptySet()
+                            when (f.id) {
+                                0xF7L -> trackNo = reader.unsigned(f.dataStart, f.size)
+                                0xF1L -> clusterPos = reader.unsigned(f.dataStart, f.size)
+                                0xF0L -> relPos = reader.unsigned(f.dataStart, f.size)
+                            }
+                            r = f.end
+                        }
+                        if (wanted.containsKey(trackNo)) {
+                            if (clusterPos < 0 || relPos < 0) broken += trackNo
+                            else refs.getOrPut(trackNo) { mutableListOf() } += CueRef(clusterPos, relPos)
+                        }
+                    }
+                    q = tp.end
+                }
+            }
+            cp = point.end
+        }
+
+        val timecodeCache = HashMap<Long, Long>()
+        val accepted = mutableSetOf<SubtitleTrack>()
+        for ((trackNo, track) in wanted) {
+            val list = refs[trackNo] ?: continue
+            if (trackNo in broken || list.isEmpty()) continue
+            val codec = track.codec.lowercase(Locale.ROOT)
+            if (codec != "ass" && codec != "ssa") continue   // no completeness proof for SRT
+
+            val sorted = list.sortedWith(compareBy<CueRef>({ it.clusterPos }, { it.relPos }))
+            val collected = ArrayList<RawCue>(sorted.size)
+            var ok = true
+            var last: CueRef? = null
+            for (ref in sorted) {
+                val prev = last
+                if (prev != null && prev.clusterPos == ref.clusterPos && prev.relPos == ref.relPos) continue
+                last = ref
+                val good = try {
+                    readCuedBlock(reader, segmentStart, segmentEnd, ref, trackNo, timecodeScale, timecodeCache, collected)
+                } catch (_: Exception) {
+                    false
+                }
+                if (!good) { ok = false; break }
+            }
+            if (!ok || collected.isEmpty()) continue
+
+            val orders = LongArray(collected.size)
+            var complete = true
+            for (i in collected.indices) {
+                val d = collected[i].data
+                val v = String(d, 0, minOf(d.size, 24), Charsets.UTF_8).substringBefore(',').trim().toLongOrNull()
+                if (v == null) { complete = false; break }
+                orders[i] = v
+            }
+            if (complete) {
+                orders.sort()
+                for (i in orders.indices) {
+                    if (orders[i] != i.toLong()) { complete = false; break }
+                }
+            }
+            if (!complete) continue
+
+            cues.getValue(track).addAll(collected)
+            accepted += track
+        }
+        return accepted
+    }
+
+    private fun readCuedBlock(
+        reader: MkvBlockReader,
+        segmentStart: Long,
+        segmentEnd: Long,
+        ref: CueRef,
+        trackNo: Long,
+        timecodeScale: Long,
+        timecodeCache: HashMap<Long, Long>,
+        out: MutableList<RawCue>
+    ): Boolean {
+        val cluster = readHeader(reader, segmentStart + ref.clusterPos, segmentEnd) ?: return false
+        if (cluster.id != 0x1F43B675L) return false
+
+        var clusterTs = timecodeCache[ref.clusterPos]
+        if (clusterTs == null) {
+            var found = -1L
+            var p = cluster.dataStart
+            var looked = 0
+            while (looked < 8 && p < segmentEnd) {
+                val c = readHeader(reader, p, segmentEnd) ?: return false
+                if (c.size < 0) return false
+                if (c.id == 0xE7L) { found = reader.unsigned(c.dataStart, c.size); break }
+                p = c.end
+                looked++
+            }
+            if (found < 0) return false
+            timecodeCache[ref.clusterPos] = found
+            clusterTs = found
+        }
+
+        val el = readHeader(reader, cluster.dataStart + ref.relPos, segmentEnd) ?: return false
+        var blockStart = -1L
+        var blockSize = 0L
+        var duration = 0L
+        when (el.id) {
+            0xA3L -> { blockStart = el.dataStart; blockSize = el.size }
+            0xA0L -> {
+                if (el.size < 0) return false
+                var q = el.dataStart
+                while (q < el.end) {
+                    val g = readHeader(reader, q, el.end) ?: break
+                    if (g.size < 0) return false
+                    if (g.id == 0xA1L) { blockStart = g.dataStart; blockSize = g.size }
+                    else if (g.id == 0x9BL) duration = reader.unsigned(g.dataStart, g.size)
+                    q = g.end
+                }
+            }
+            else -> return false
+        }
+        if (blockStart < 0 || blockSize <= 0) return false
+
+        val first = reader.u8(blockStart)
+        if (first <= 0) return false
+        val trackLen = Integer.numberOfLeadingZeros(first) - 24 + 1
+        var blockTrack = (first and (0xFF ushr trackLen)).toLong()
+        for (i in 1 until trackLen) {
+            blockTrack = (blockTrack shl 8) or reader.u8(blockStart + i).coerceAtLeast(0).toLong()
+        }
+        if (blockTrack != trackNo) return false
+        val headerLen = trackLen + 3
+        val rel = ((reader.u8(blockStart + trackLen).coerceAtLeast(0) shl 8) or
+            reader.u8(blockStart + trackLen + 1).coerceAtLeast(0)).toShort().toLong()
+        val flags = reader.u8(blockStart + trackLen + 2)
+        if (((flags shr 1) and 3) != 0) return false
+        val payloadSize = blockSize - headerLen
+        if (payloadSize <= 0 || payloadSize > 4_000_000) return false
+        out += RawCue(
+            startMs = (clusterTs + rel) * timecodeScale / 1_000_000L,
+            durationMs = duration * timecodeScale / 1_000_000L,
+            data = reader.bytes(blockStart + headerLen, payloadSize.toInt())
+        )
+        return true
     }
 
     /** Prefer reading the picked file through its descriptor; only copy to cache as a last resort. */
@@ -1201,7 +1467,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun materializeForExport(video: ScannedVideo): File {
-        val local = File(cacheDir, "subtitle_input_export_${System.currentTimeMillis()}.mkv")
+        val local = File(cacheDir, "subtitle_input_export_${System.nanoTime()}_${Thread.currentThread().id}.mkv")
         contentResolver.openInputStream(video.uri).use { input ->
             requireNotNull(input) { "Could not read selected video for export." }
             local.outputStream().buffered().use { output -> input.copyTo(output) }
