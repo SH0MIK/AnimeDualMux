@@ -43,10 +43,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFprobeKit
-import com.arthenica.ffmpegkit.ReturnCode
-import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.util.Locale
@@ -76,6 +72,9 @@ private data class SubtitleTrack(
     val label: String
         get() = "Track #$index · ${language.uppercase(Locale.ROOT)} · " +
             (title.takeIf { it.isNotBlank() }?.let { "$it · " } ?: "") + codec
+
+    val nativeSupported: Boolean
+        get() = codec.lowercase(Locale.ROOT) in NATIVE_SUBTITLE_CODECS
 }
 
 private data class ScannedVideo(
@@ -83,6 +82,8 @@ private data class ScannedVideo(
     val name: String,
     val tracks: List<SubtitleTrack>
 )
+
+private val NATIVE_SUBTITLE_CODECS = setOf("ass", "ssa", "subrip", "webvtt")
 
 private val ASS_TIME_REGEX = Regex("""^(\d+):(\d{2}):(\d{2})[.](\d{2})$""")
 private val HTML_TAG_REGEX = Regex("""<[^>]*>""")
@@ -191,7 +192,7 @@ class MainActivity : ComponentActivity() {
             if (uri != null) {
                 val snapshot = videos
                 val chosen = snapshot.flatMap { video ->
-                    video.tracks.filter { extractAll || selected[key(video, it)] == true }
+                    video.tracks.filter { it.nativeSupported && (extractAll || selected[key(video, it)] == true) }
                         .map { video to it }
                 }
                 if (chosen.isEmpty()) {
@@ -406,8 +407,8 @@ class MainActivity : ComponentActivity() {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     RadioButton(selected = extractAll, onClick = { extractAll = true }, enabled = !busy)
                                     Column(Modifier.weight(1f)) {
-                                        Text("Export every track", fontWeight = if (extractAll) FontWeight.SemiBold else FontWeight.Normal)
-                                        Text("Fastest way to export the whole file", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("Export every supported track", fontWeight = if (extractAll) FontWeight.SemiBold else FontWeight.Normal)
+                                        Text("Fastest way to export all text subtitle tracks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -453,11 +454,12 @@ class MainActivity : ComponentActivity() {
                                                 Checkbox(
                                                     checked = selected[key(video, track)] == true,
                                                     onCheckedChange = { selected[key(video, track)] = it },
-                                                    enabled = !extractAll && !busy
+                                                    enabled = !extractAll && !busy && track.nativeSupported
                                                 )
                                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                                     Text(track.title.takeIf { it.isNotBlank() } ?: track.language.uppercase(Locale.ROOT), fontWeight = FontWeight.SemiBold)
                                                     Text("Track ${track.index}  ·  ${track.codec.uppercase(Locale.ROOT)}  ·  ${track.language.uppercase(Locale.ROOT)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                     if (!track.nativeSupported) Text("Not supported by the native extractor", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                                                 }
                                                 if (convertAssToVtt && track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")) {
                                                     Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF183638)) {
@@ -472,12 +474,12 @@ class MainActivity : ComponentActivity() {
                         }
 
                         val chosenCount = videos.sumOf { video ->
-                            video.tracks.count { extractAll || selected[key(video, it)] == true }
+                            video.tracks.count { it.nativeSupported && (extractAll || selected[key(video, it)] == true) }
                         }
                         Button(
                             onClick = {
                                 val video = videos.singleOrNull()
-                                val tracks = video?.tracks?.filter { extractAll || selected[key(video, it)] == true }.orEmpty()
+                                val tracks = video?.tracks?.filter { it.nativeSupported && (extractAll || selected[key(video, it)] == true) }.orEmpty()
                                 if (video != null && tracks.size == 1) {
                                     pendingSingle = video to tracks.first()
                                     saveSingle.launch(
@@ -569,7 +571,7 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 selected.clear()
                 scanned.forEach { video ->
-                    video.tracks.forEach { selected[key(video, it)] = true }
+                    video.tracks.forEach { track -> selected[key(video, track)] = track.nativeSupported }
                 }
                 done(
                     scanned,
@@ -846,11 +848,8 @@ class MainActivity : ComponentActivity() {
     // ---------------------------------------------------------------------
     // Export
     //
-    // Text tracks (ASS/SSA/SRT) are pulled straight out of the MKV by walking
-    // Cluster -> Block headers and seeking past every video/audio payload.
-    // No cache copy of the video, no FFmpeg process. PGS/VobSub/WebVTT still go
-    // through FFmpeg, but read the file through its descriptor (no copy) when
-    // possible.
+    // Text subtitle tracks are parsed directly from Matroska blocks. The reader
+    // seeks over video/audio payloads and never invokes external media tools.
     // ---------------------------------------------------------------------
 
     private class RawCue(val startMs: Long, val durationMs: Long, val data: ByteArray)
@@ -954,6 +953,50 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun writeWebVttFile(file: File, track: SubtitleTrack, cues: List<RawCue>) {
+        val privateHeader = track.codecPrivate
+            .removePrefix("\uFEFF")
+            .replace("\r\n", "\n")
+            .trimEnd()
+        val header = if (privateHeader.startsWith("WEBVTT")) {
+            privateHeader
+        } else {
+            "WEBVTT" + if (privateHeader.isNotBlank()) "\n\n$privateHeader" else ""
+        }
+
+        file.bufferedWriter(Charsets.UTF_8).use { w ->
+            w.write(header)
+            w.write("\n\n")
+            cues.withIndex()
+                .sortedWith(compareBy<IndexedValue<RawCue>> { it.value.startMs }.thenBy { it.index })
+                .forEach { (_, cue) ->
+                    val rawText = String(cue.data, Charsets.UTF_8).trimEnd('\r', '\n')
+                    if (rawText.isNotBlank()) {
+                        val end = cue.startMs + if (cue.durationMs > 0) cue.durationMs else 2000
+                        w.write("${vttClock(cue.startMs)} --> ${vttClock(end)}\n")
+                        w.write(restoreVttInlineTimestamps(rawText, cue.startMs))
+                        w.write("\n\n")
+                    }
+                }
+        }
+    }
+
+    private val vttInlineTimestampRegex = Regex("""<(\d{2,}):([0-5]\d):([0-5]\d)\.(\d{3})>""")
+
+    private fun restoreVttInlineTimestamps(text: String, offsetMs: Long): String =
+        vttInlineTimestampRegex.replace(text) { match ->
+            val groups = match.groupValues
+            val relativeMs = (((groups[1].toLong() * 60 + groups[2].toLong()) * 60 +
+                groups[3].toLong()) * 1000) + groups[4].toLong()
+            "<${vttClock(relativeMs + offsetMs)}>"
+        }
+
+    private fun vttClock(ms: Long): String =
+        String.format(
+            Locale.ROOT, "%02d:%02d:%02d.%03d",
+            ms / 3600000, (ms / 60000) % 60, (ms / 1000) % 60, ms % 1000
+        )
+
     private fun writeAssFile(file: File, track: SubtitleTrack, cues: List<RawCue>) {
         val isSsa = track.codec.equals("ssa", ignoreCase = true)
         var header = track.codecPrivate.removePrefix("\uFEFF").replace("\r\n", "\n").trimEnd()
@@ -986,6 +1029,9 @@ class MainActivity : ComponentActivity() {
         tracks: List<SubtitleTrack>,
         convertAssToVtt: Boolean
     ): Map<SubtitleTrack, File> {
+        require(tracks.all { it.nativeSupported }) {
+            "Native extraction supports ASS, SSA, SRT, and WebVTT tracks only."
+        }
         val wanted = tracks.associateBy { it.index.toLong() }
         val cues = tracks.associateWith { mutableListOf<RawCue>() }
         val level1Ids = setOf(
@@ -1121,8 +1167,12 @@ class MainActivity : ComponentActivity() {
                     "subtitle_native_$stamp." + if (codec == "subrip") "srt" else codec
                 )
                 created += source
-                if (codec == "subrip") writeSrtFile(source, trackCues)
-                else writeAssFile(source, track, trackCues)
+                when (codec) {
+                    "subrip" -> writeSrtFile(source, trackCues)
+                    "webvtt" -> writeWebVttFile(source, track, trackCues)
+                    "ass", "ssa" -> writeAssFile(source, track, trackCues)
+                    else -> error("Native extraction does not support ${track.codec} tracks yet.")
+                }
 
                 if (converting) {
                     val output = File(cacheDir, "subtitle_native_out_$stamp.vtt")
@@ -1367,111 +1417,18 @@ class MainActivity : ComponentActivity() {
         return true
     }
 
-    /** Prefer reading the picked file through its descriptor; only copy to cache as a last resort. */
-    private fun <T> withFfmpegInput(video: ScannedVideo, block: (String) -> T): T {
-        try {
-            contentResolver.openFileDescriptor(video.uri, "r").use { descriptor ->
-                if (descriptor != null) {
-                    val path = "/proc/self/fd/${descriptor.fd}"
-                    if (File(path).canRead()) return block(path)
-                }
-            }
-        } catch (_: Exception) {
-            // fall through to the copy path
-        }
-        val local = materializeForExport(video)
-        try {
-            return block(local.absolutePath)
-        } finally {
-            local.delete()
-        }
-    }
-
-    /** FFmpeg path, used for PGS / VobSub / WebVTT or if the native reader hits something odd. */
-    private fun extractWithFfmpeg(
-        video: ScannedVideo,
-        tracks: List<SubtitleTrack>,
-        convertAssToVtt: Boolean
-    ): Map<SubtitleTrack, File> {
-        val intermediates = linkedMapOf<SubtitleTrack, File>()
-        val outputs = linkedMapOf<SubtitleTrack, File>()
-        val mapArgs = mutableListOf<String>()
-
-        tracks.forEach { track ->
-            val converting = convertAssToVtt && track.codec.lowercase(Locale.ROOT) in setOf("ass", "ssa")
-            val extension = if (converting) track.codec.lowercase(Locale.ROOT) else exportExtension(track, convertAssToVtt)
-            val stamp = "${track.index}_${System.nanoTime()}"
-            val intermediate = File(cacheDir, "subtitle_batch_source_$stamp.$extension")
-            val output = if (converting) File(cacheDir, "subtitle_batch_output_$stamp.vtt") else intermediate
-            intermediates[track] = intermediate
-            outputs[track] = output
-            mapArgs.addAll(listOf("-map", "0:s:${track.streamIndex}", "-c:s", "copy", intermediate.absolutePath))
-        }
-
-        try {
-            val session = withFfmpegInput(video) { path ->
-                FFmpegKit.executeWithArguments(
-                    (listOf("-y", "-v", "error", "-i", path) + mapArgs).toTypedArray()
-                )
-            }
-            if (!ReturnCode.isSuccess(session.returnCode)) {
-                error("Extraction failed: " + (session.failStackTrace ?: session.output.take(300)))
-            }
-            tracks.forEach { track ->
-                val intermediate = intermediates.getValue(track)
-                val output = outputs.getValue(track)
-                check(intermediate.exists() && intermediate.length() > 0L) {
-                    "Track #${track.index} (${track.codec}) produced an empty file."
-                }
-                if (output != intermediate) {
-                    convertAssToPlainVtt(intermediate, output)
-                    intermediate.delete()
-                }
-            }
-            return outputs
-        } catch (e: Exception) {
-            intermediates.values.forEach { it.delete() }
-            outputs.values.forEach { it.delete() }
-            throw e
-        }
-    }
-
     private fun extractMultiple(
         video: ScannedVideo,
         tracks: List<SubtitleTrack>,
         convertAssToVtt: Boolean
     ): Map<SubtitleTrack, File> {
         require(tracks.isNotEmpty()) { "No subtitle tracks selected." }
-        val nativeCodecs = setOf("ass", "ssa", "subrip")
-        val results = linkedMapOf<SubtitleTrack, File>()
-        var remaining = tracks
-
-        val textTracks = tracks.filter { it.codec.lowercase(Locale.ROOT) in nativeCodecs }
-        if (textTracks.isNotEmpty()) {
-            try {
-                results += extractTextTracksNative(video, textTracks, convertAssToVtt)
-                remaining = tracks.filterNot { it in textTracks }
-            } catch (_: Exception) {
-                // Unusual file (laced blocks, damaged clusters...): let FFmpeg handle everything.
-            }
+        val unsupported = tracks.filterNot { it.nativeSupported }
+        require(unsupported.isEmpty()) {
+            "This app's native extractor supports ASS, SSA, SRT, and WebVTT only. " +
+                "Image-based or other tracks are unsupported: " +
+                unsupported.joinToString { "Track #${it.index} (${it.codec})" }
         }
-        if (remaining.isNotEmpty()) {
-            try {
-                results += extractWithFfmpeg(video, remaining, convertAssToVtt)
-            } catch (e: Exception) {
-                results.values.forEach { it.delete() }
-                throw e
-            }
-        }
-        return tracks.associateWith { results.getValue(it) }
-    }
-
-    private fun materializeForExport(video: ScannedVideo): File {
-        val local = File(cacheDir, "subtitle_input_export_${System.nanoTime()}_${Thread.currentThread().id}.mkv")
-        contentResolver.openInputStream(video.uri).use { input ->
-            requireNotNull(input) { "Could not read selected video for export." }
-            local.outputStream().buffered().use { output -> input.copyTo(output) }
-        }
-        return local
+        return extractTextTracksNative(video, tracks, convertAssToVtt)
     }
 }
