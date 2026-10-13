@@ -974,7 +974,7 @@ class MainActivity : ComponentActivity() {
             cues.forEachIndexed { i, cue ->
                 val end = cue.startMs + if (cue.durationMs > 0) cue.durationMs else 2000
                 w.write("${i + 1}\n${srtClock(cue.startMs)} --> ${srtClock(end)}\n")
-                w.write(String(cue.data, Charsets.UTF_8).trim())
+                w.write(String(cue.data, Charsets.UTF_8).replace("\u0000", "").trim())
                 w.write("\n\n")
             }
         }
@@ -997,7 +997,7 @@ class MainActivity : ComponentActivity() {
             cues.withIndex()
                 .sortedWith(compareBy<IndexedValue<RawCue>> { it.value.startMs }.thenBy { it.index })
                 .forEach { (_, cue) ->
-                    val rawText = String(cue.data, Charsets.UTF_8).trimEnd('\r', '\n')
+                    val rawText = String(cue.data, Charsets.UTF_8).replace("\u0000", "").trimEnd('\r', '\n')
                     if (rawText.isNotBlank()) {
                         val end = cue.startMs + if (cue.durationMs > 0) cue.durationMs else 2000
                         w.write("${vttClock(cue.startMs)} --> ${vttClock(end)}\n")
@@ -1044,7 +1044,7 @@ class MainActivity : ComponentActivity() {
                 w.write(
                     "Dialogue: ${parts[1]},${assClock(cue.startMs)},${assClock(end)}," +
                         "${parts[2]},${parts[3]},${parts[4]},${parts[5]},${parts[6]},${parts[7]}," +
-                        parts[8].trimEnd('\r', '\n') + "\n"
+                        parts[8].trimEnd('\u0000', '\r', '\n') + "\n"
                 )
             }
         }
