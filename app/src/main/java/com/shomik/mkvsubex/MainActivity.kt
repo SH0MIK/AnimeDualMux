@@ -222,8 +222,8 @@ class MainActivity : ComponentActivity() {
                                     groups.forEachIndexed { groupIndex, group ->
                                         val video = group.first().first
                                         runOnUiThread {
-                                            progress = completed.toFloat() / chosen.size
-                                            status = "Exporting ${groupIndex + 1} of ${groups.size}: ${video.name}"
+                                            progress = 0.95f * completed.toFloat() / chosen.size
+                                            status = "Extracting and converting ${groupIndex + 1} of ${groups.size}: ${video.name}"
                                         }
                                         val outputs = try {
                                             futures[groupIndex].get()
@@ -247,7 +247,7 @@ class MainActivity : ComponentActivity() {
                                                 FileInputStream(output).use { it.copyTo(zip) }
                                                 zip.closeEntry()
                                                 completed++
-                                                runOnUiThread { progress = completed.toFloat() / chosen.size }
+                                                runOnUiThread { progress = 0.95f * completed.toFloat() / chosen.size }
                                             }
                                         } finally {
                                             outputs.values.forEach { it.delete() }
@@ -262,6 +262,10 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 }
+                            }
+                            runOnUiThread {
+                                progress = 0.97f
+                                status = "Saving completed subtitle archive…"
                             }
                             contentResolver.openOutputStream(uri).use { stream ->
                                 requireNotNull(stream) { "Could not open ZIP destination." }
