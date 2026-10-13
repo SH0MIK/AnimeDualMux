@@ -34,6 +34,5 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
-    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full-gpl:8.1.9")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
