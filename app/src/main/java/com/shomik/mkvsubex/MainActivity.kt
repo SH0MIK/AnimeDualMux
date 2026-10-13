@@ -760,7 +760,7 @@ class MainActivity : ComponentActivity() {
             track.extension
         }
 
-    private val ASS_DRAWING_MODE_REGEX = Regex("""\\\\p[1-9]\\d*""")
+    private val ASS_DRAWING_MODE_REGEX = Regex("""\\p[1-9]\d*""")
 
     /**
      * Convert directly from Matroska ASS packets to WebVTT.
@@ -773,20 +773,20 @@ class MainActivity : ComponentActivity() {
 
         cues.forEachIndexed { order, cue ->
             // Matroska ASS packet: ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-            val packet = String(cue.data, Charsets.UTF_8).trimEnd('\\u0000', '\\r', '\\n')
+            val packet = String(cue.data, Charsets.UTF_8).trimEnd('\u0000', '\r', '\n')
             val fields = packet.split(",", limit = 9)
             if (fields.size < 9) return@forEachIndexed
-            val rawText = fields[8].replace("\\u0000", "")
+            val rawText = fields[8].replace("\u0000", "")
             // Plain WebVTT cannot represent ASS vector drawings; don't leak drawing commands as dialogue.
             if (ASS_DRAWING_MODE_REGEX.containsMatchIn(rawText)) return@forEachIndexed
 
             val dialogue = stripAssOverrideBlocks(rawText)
                 .replace(HTML_TAG_REGEX, "")
-                .replace("\\\\N", "\\n")
-                .replace("\\\\n", "\\n")
-                .replace("\\\\h", " ")
-                .replace(BLANK_LINES_REGEX, "\\n")
-                .replace("\\u0000", "")
+                .replace("\\N", "\n")
+                .replace("\\n", "\n")
+                .replace("\\h", " ")
+                .replace(BLANK_LINES_REGEX, "\n")
+                .replace("\u0000", "")
                 .trim()
             if (dialogue.isEmpty()) return@forEachIndexed
 
@@ -808,11 +808,11 @@ class MainActivity : ComponentActivity() {
         } else converted
 
         destination.bufferedWriter(Charsets.UTF_8).use { writer ->
-            writer.write("WEBVTT\\n\\n")
+            writer.write("WEBVTT\n\n")
             ordered.forEach { cue ->
-                writer.write("${vttClock(cue.startMillis)} --> ${vttClock(cue.endMillis)}\\n")
+                writer.write("${vttClock(cue.startMillis)} --> ${vttClock(cue.endMillis)}\n")
                 writer.write(cue.text)
-                writer.write("\\n\\n")
+                writer.write("\n\n")
             }
         }
     }
