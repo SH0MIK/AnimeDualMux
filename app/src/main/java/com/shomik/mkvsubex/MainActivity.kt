@@ -760,54 +760,61 @@ class MainActivity : ComponentActivity() {
             track.extension
         }
 
-    private fun convertAssToPlainVtt(source: File, destination: File) {
-        val lines = source.readText(Charsets.UTF_8)
-            .removePrefix("\uFEFF")
-            .lines()
-        var inEvents = false
-        var fields = emptyList<String>()
-        data class VttCue(val startMillis: Long, val order: Int, val text: String)
-        val cues = mutableListOf<VttCue>()
+    private val ASS_DRAWING_MODE_REGEX = Regex("""\\\\p[1-9]\\d*""")
 
-        for (line in lines) {
-            val trimmed = line.trim()
-            if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-                inEvents = trimmed.equals("[Events]", ignoreCase = true)
-                continue
-            }
-            if (!inEvents) continue
+    /**
+     * Convert directly from Matroska ASS packets to WebVTT.
+     * Avoids writing an intermediate ASS file and parsing it back, which is
+     * particularly expensive for karaoke-heavy tracks with thousands of events.
+     */
+    private fun writeAssToPlainVttFile(destination: File, cues: List<RawCue>) {
+        data class VttCue(val startMillis: Long, val endMillis: Long, val order: Int, val text: String)
+        val converted = ArrayList<VttCue>(cues.size)
 
-            if (trimmed.startsWith("Format:", ignoreCase = true)) {
-                fields = trimmed.substringAfter(":").split(",").map {
-                    it.trim().lowercase(Locale.ROOT)
-                }
-                continue
-            }
-            if (!trimmed.startsWith("Dialogue:", ignoreCase = true) || fields.isEmpty()) continue
+        cues.forEachIndexed { order, cue ->
+            // Matroska ASS packet: ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+            val packet = String(cue.data, Charsets.UTF_8).trimEnd('\\u0000', '\\r', '\\n')
+            val fields = packet.split(",", limit = 9)
+            if (fields.size < 9) return@forEachIndexed
+            val rawText = fields[8].replace("\\u0000", "")
+            // Plain WebVTT cannot represent ASS vector drawings; don't leak drawing commands as dialogue.
+            if (ASS_DRAWING_MODE_REGEX.containsMatchIn(rawText)) return@forEachIndexed
 
-            val values = trimmed.substringAfter(":").trimStart().split(",", limit = fields.size)
-            if (values.size != fields.size) continue
-            val startIndex = fields.indexOf("start")
-            val endIndex = fields.indexOf("end")
-            val textIndex = fields.indexOf("text")
-            if (startIndex < 0 || endIndex < 0 || textIndex < 0) continue
-
-            val start = assTimeToVtt(values[startIndex].trim())
-            val end = assTimeToVtt(values[endIndex].trim())
-            val dialogue = stripAssOverrideBlocks(values[textIndex])
+            val dialogue = stripAssOverrideBlocks(rawText)
                 .replace(HTML_TAG_REGEX, "")
-                .replace("\\N", "\n")
-                .replace("\\n", "\n")
-                .replace("\\h", " ")
-                .replace(BLANK_LINES_REGEX, "\n")
+                .replace("\\\\N", "\\n")
+                .replace("\\\\n", "\\n")
+                .replace("\\\\h", " ")
+                .replace(BLANK_LINES_REGEX, "\\n")
+                .replace("\\u0000", "")
                 .trim()
-            if (dialogue.isEmpty()) continue
-            cues += VttCue(assTimeToMillis(values[startIndex].trim()), cues.size, "$start --> $end\n$dialogue")
+            if (dialogue.isEmpty()) return@forEachIndexed
+
+            converted += VttCue(
+                startMillis = cue.startMs,
+                endMillis = cue.startMs + if (cue.durationMs > 0) cue.durationMs else 2000,
+                order = order,
+                text = dialogue
+            )
         }
 
-        check(cues.isNotEmpty()) { "No readable ASS/SSA dialogue cues were found." }
-        val sortedCues = cues.sortedWith(compareBy<VttCue> { it.startMillis }.thenBy { it.order })
-        destination.writeText("WEBVTT\n\n" + sortedCues.joinToString("\n\n") { it.text } + "\n", Charsets.UTF_8)
+        check(converted.isNotEmpty()) { "No readable ASS/SSA text cues were found (the track may contain only vector signs or unsupported effects)." }
+
+        // Most Matroska subtitle tracks are already time ordered. Avoid an O(n log n)
+        // sort unless the source actually contains out-of-order events.
+        val ordered = if (converted.zipWithNext().any { (a, b) -> a.startMillis > b.startMillis }) {
+            converted.sortWith(compareBy<VttCue> { it.startMillis }.thenBy { it.order })
+            converted
+        } else converted
+
+        destination.bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.write("WEBVTT\\n\\n")
+            ordered.forEach { cue ->
+                writer.write("${vttClock(cue.startMillis)} --> ${vttClock(cue.endMillis)}\\n")
+                writer.write(cue.text)
+                writer.write("\\n\\n")
+            }
+        }
     }
 
     private fun stripAssOverrideBlocks(value: String): String {
@@ -1162,25 +1169,24 @@ class MainActivity : ComponentActivity() {
                 val codec = track.codec.lowercase(Locale.ROOT)
                 val converting = convertAssToVtt && codec in setOf("ass", "ssa")
                 val stamp = "${track.index}_${System.nanoTime()}"
-                val source = File(
-                    cacheDir,
-                    "subtitle_native_$stamp." + if (codec == "subrip") "srt" else codec
-                )
-                created += source
-                when (codec) {
-                    "subrip" -> writeSrtFile(source, trackCues)
-                    "webvtt" -> writeWebVttFile(source, track, trackCues)
-                    "ass", "ssa" -> writeAssFile(source, track, trackCues)
-                    else -> error("Native extraction does not support ${track.codec} tracks yet.")
-                }
 
                 if (converting) {
                     val output = File(cacheDir, "subtitle_native_out_$stamp.vtt")
                     created += output
-                    convertAssToPlainVtt(source, output)
-                    source.delete()
+                    writeAssToPlainVttFile(output, trackCues)
                     outputs[track] = output
                 } else {
+                    val source = File(
+                        cacheDir,
+                        "subtitle_native_$stamp." + if (codec == "subrip") "srt" else codec
+                    )
+                    created += source
+                    when (codec) {
+                        "subrip" -> writeSrtFile(source, trackCues)
+                        "webvtt" -> writeWebVttFile(source, track, trackCues)
+                        "ass", "ssa" -> writeAssFile(source, track, trackCues)
+                        else -> error("Native extraction does not support ${track.codec} tracks yet.")
+                    }
                     outputs[track] = source
                 }
             }
