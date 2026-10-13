@@ -94,7 +94,9 @@ class MainActivity : ComponentActivity() {
 
     // Several MKVs are read at the same time during bulk export.
     private val extractPool = Executors.newFixedThreadPool(
-        Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
+        // Subtitle extraction is storage-bound; too many simultaneous MKV scans
+        // cause random-I/O contention and memory spikes on phones.
+        Runtime.getRuntime().availableProcessors().coerceIn(2, 3)
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -807,9 +809,27 @@ class MainActivity : ComponentActivity() {
             converted
         } else converted
 
+        // Animated ASS signs often repeat the same text in dozens or hundreds of
+        // overlapping packets. Collapse only adjacent/overlapping identical text;
+        // separate occurrences later in the episode remain separate cues.
+        val compacted = ArrayList<VttCue>(ordered.size)
+        ordered.forEach { cue ->
+            val previous = compacted.lastOrNull()
+            if (previous != null && previous.text == cue.text &&
+                cue.startMillis <= previous.endMillis + 100 &&
+                cue.startMillis >= previous.startMillis
+            ) {
+                compacted[compacted.lastIndex] = previous.copy(
+                    endMillis = maxOf(previous.endMillis, cue.endMillis)
+                )
+            } else {
+                compacted += cue
+            }
+        }
+
         destination.bufferedWriter(Charsets.UTF_8).use { writer ->
             writer.write("WEBVTT\n\n")
-            ordered.forEach { cue ->
+            compacted.forEach { cue ->
                 writer.write("${vttClock(cue.startMillis)} --> ${vttClock(cue.endMillis)}\n")
                 writer.write(cue.text)
                 writer.write("\n\n")
